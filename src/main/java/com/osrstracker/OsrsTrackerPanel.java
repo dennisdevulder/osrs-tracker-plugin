@@ -24,21 +24,31 @@
  */
 package com.osrstracker;
 
+import com.osrstracker.bingo.BingoSubscriptionManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.PluginPanel;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.border.LineBorder;
 import java.awt.*;
 
 /**
- * Simple sidebar panel for OSRS Tracker with a Quick Capture button.
+ * Simple sidebar panel for OSRS Tracker with a Quick Capture button
+ * and active bingo event display.
  */
 public class OsrsTrackerPanel extends PluginPanel
 {
     private final Runnable quickCaptureAction;
+    private final BingoSubscriptionManager bingoManager;
     private JButton captureButton;
     private JLabel statusLabel;
+
+    // Bingo section components
+    private JPanel bingoPanel;
+    private JLabel bingoEventLabel;
+    private JLabel bingoStatusLabel;
+    private JLabel bingoProgressLabel;
 
     // Colors for different states
     private static final Color COLOR_READY = new Color(46, 204, 113);      // Green
@@ -47,11 +57,14 @@ public class OsrsTrackerPanel extends PluginPanel
     private static final Color COLOR_UPLOADING = new Color(155, 89, 182);  // Purple
     private static final Color COLOR_ERROR = new Color(231, 76, 60);       // Red
     private static final Color COLOR_COOLDOWN = new Color(149, 165, 166);  // Gray
+    private static final Color COLOR_BINGO_ACTIVE = new Color(46, 204, 113);   // Green
+    private static final Color COLOR_BINGO_INACTIVE = new Color(149, 165, 166); // Gray
 
-    public OsrsTrackerPanel(Runnable quickCaptureAction)
+    public OsrsTrackerPanel(Runnable quickCaptureAction, BingoSubscriptionManager bingoManager)
     {
         super(false);
         this.quickCaptureAction = quickCaptureAction;
+        this.bingoManager = bingoManager;
 
         setLayout(new BorderLayout());
         setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -103,7 +116,120 @@ public class OsrsTrackerPanel extends PluginPanel
         statusLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         contentPanel.add(statusLabel);
 
+        contentPanel.add(Box.createVerticalStrut(30));
+
+        // Bingo section
+        bingoPanel = createBingoSection();
+        contentPanel.add(bingoPanel);
+
         add(contentPanel, BorderLayout.NORTH);
+
+        // Register for bingo subscription changes
+        if (bingoManager != null)
+        {
+            bingoManager.setOnSubscriptionChanged(this::updateBingoSection);
+        }
+    }
+
+    /**
+     * Creates the bingo event section of the panel.
+     */
+    private JPanel createBingoSection()
+    {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        panel.setBorder(BorderFactory.createCompoundBorder(
+            new LineBorder(ColorScheme.MEDIUM_GRAY_COLOR, 1, true),
+            new EmptyBorder(10, 10, 10, 10)
+        ));
+        panel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 120));
+
+        // Section title
+        JLabel titleLabel = new JLabel("Active Bingo Event");
+        titleLabel.setFont(new Font("Arial", Font.BOLD, 12));
+        titleLabel.setForeground(Color.WHITE);
+        titleLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        panel.add(titleLabel);
+
+        panel.add(Box.createVerticalStrut(8));
+
+        // Event name
+        bingoEventLabel = new JLabel("None");
+        bingoEventLabel.setFont(new Font("Arial", Font.PLAIN, 11));
+        bingoEventLabel.setForeground(COLOR_BINGO_INACTIVE);
+        bingoEventLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        panel.add(bingoEventLabel);
+
+        panel.add(Box.createVerticalStrut(4));
+
+        // Status indicator
+        bingoStatusLabel = new JLabel("\u25CF Not Tracking");  // ● bullet point
+        bingoStatusLabel.setFont(new Font("Arial", Font.BOLD, 11));
+        bingoStatusLabel.setForeground(COLOR_BINGO_INACTIVE);
+        bingoStatusLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        panel.add(bingoStatusLabel);
+
+        panel.add(Box.createVerticalStrut(4));
+
+        // Progress info
+        bingoProgressLabel = new JLabel("");
+        bingoProgressLabel.setFont(new Font("Arial", Font.PLAIN, 10));
+        bingoProgressLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        bingoProgressLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        panel.add(bingoProgressLabel);
+
+        return panel;
+    }
+
+    /**
+     * Updates the bingo section based on current subscription state.
+     */
+    public void updateBingoSection()
+    {
+        SwingUtilities.invokeLater(() -> {
+            if (bingoManager == null)
+            {
+                return;
+            }
+
+            if (bingoManager.hasActiveEvent())
+            {
+                String eventName = bingoManager.getActiveEventName();
+                if (eventName != null && eventName.length() > 25)
+                {
+                    eventName = eventName.substring(0, 22) + "...";
+                }
+
+                bingoEventLabel.setText(eventName != null ? eventName : "Active Event");
+                bingoEventLabel.setForeground(Color.WHITE);
+
+                bingoStatusLabel.setText("\u25CF Tracking");
+                bingoStatusLabel.setForeground(COLOR_BINGO_ACTIVE);
+
+                int tracked = bingoManager.getTrackedTileCount();
+                int completed = bingoManager.getCompletedTileCount();
+                if (tracked > 0)
+                {
+                    bingoProgressLabel.setText(completed + " / " + tracked + " tiles tracked");
+                }
+                else
+                {
+                    bingoProgressLabel.setText("Waiting for tiles...");
+                }
+            }
+            else
+            {
+                bingoEventLabel.setText("None");
+                bingoEventLabel.setForeground(COLOR_BINGO_INACTIVE);
+
+                bingoStatusLabel.setText("\u25CF Not Tracking");
+                bingoStatusLabel.setForeground(COLOR_BINGO_INACTIVE);
+
+                bingoProgressLabel.setText("");
+            }
+        });
     }
 
     /**

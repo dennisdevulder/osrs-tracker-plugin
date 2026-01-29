@@ -101,8 +101,10 @@ public class VideoRecorder
     private final AtomicInteger pendingEncodes = new AtomicInteger(0);
     private static final int MAX_PENDING_ENCODES = 4;
 
-    // Sensitive content detection - track state for async frame processing
+    // Sensitive content detection - cached to avoid expensive widget lookups every frame
     private final AtomicBoolean sensitiveContentVisible = new AtomicBoolean(false);
+    private final AtomicLong lastSensitiveCheck = new AtomicLong(0);
+    private static final long SENSITIVE_CHECK_INTERVAL_MS = 500; // Check every 500ms instead of every frame
 
     private ScheduledFuture<?> captureTask;
 
@@ -197,6 +199,33 @@ public class VideoRecorder
         }
 
         return false;
+    }
+
+    /**
+     * Gets the cached sensitive content visibility status.
+     * Only performs the expensive widget lookup every SENSITIVE_CHECK_INTERVAL_MS milliseconds.
+     * This reduces overhead from 30 widget lookups/second to ~2/second.
+     *
+     * @param currentTime The current timestamp
+     * @return true if sensitive content is visible (cached result)
+     */
+    private boolean getCachedSensitiveContentVisible(long currentTime)
+    {
+        long lastCheck = lastSensitiveCheck.get();
+
+        // If enough time has passed, update the cached value
+        if (currentTime - lastCheck >= SENSITIVE_CHECK_INTERVAL_MS)
+        {
+            if (lastSensitiveCheck.compareAndSet(lastCheck, currentTime))
+            {
+                boolean isVisible = isSensitiveContentVisible();
+                sensitiveContentVisible.set(isVisible);
+                return isVisible;
+            }
+        }
+
+        // Return cached value
+        return sensitiveContentVisible.get();
     }
 
     /**
@@ -383,14 +412,48 @@ public class VideoRecorder
      */
     public void updateCaptureRateIfNeeded()
     {
-        if (!isRecording.get() || isCapturingPostEvent.get())
+        if (isCapturingPostEvent.get())
         {
             return;
         }
 
         VideoQuality quality = config.videoQuality();
-        int targetFps = quality.getFps() > 0 ? quality.getFps() : 30;
-        float targetJpegQuality = quality.getJpegQuality() > 0 ? quality.getJpegQuality() : 0.5f;
+
+        // Handle Screenshot Only mode - stop all frame capture
+        if (quality == VideoQuality.SCREENSHOT_ONLY)
+        {
+            if (currentCaptureFps != 0)
+            {
+                log.info("Switching to Screenshot Only mode - stopping frame capture");
+
+                // Cancel capture task
+                if (captureTask != null)
+                {
+                    captureTask.cancel(false);
+                    captureTask = null;
+                }
+
+                // Clear the buffer to free memory
+                synchronized (bufferLock)
+                {
+                    for (int i = 0; i < MAX_FRAMES; i++)
+                    {
+                        jpegBuffer[i] = null;
+                        timestampBuffer[i] = 0;
+                    }
+                    writeIndex.set(0);
+                    frameCount.set(0);
+                }
+
+                currentCaptureFps = 0;
+                currentJpegQuality = 0;
+            }
+            return;
+        }
+
+        // Video mode - ensure recording is active
+        int targetFps = quality.getFps();
+        float targetJpegQuality = quality.getJpegQuality();
 
         // Update JPEG quality if changed (takes effect on next frame)
         if (targetJpegQuality != currentJpegQuality)
@@ -403,12 +466,24 @@ public class VideoRecorder
         // Update FPS if changed (requires restarting capture task)
         if (targetFps != currentCaptureFps)
         {
-            log.debug("Quality setting changed, updating capture rate from {} to {} FPS", currentCaptureFps, targetFps);
+            log.info("Quality setting changed, updating capture rate from {} to {} FPS", currentCaptureFps, targetFps);
 
-            // Cancel current capture task
+            // Cancel current capture task if exists
             if (captureTask != null)
             {
                 captureTask.cancel(false);
+            }
+
+            // Clear buffer when switching quality to avoid mixing frame rates
+            synchronized (bufferLock)
+            {
+                for (int i = 0; i < MAX_FRAMES; i++)
+                {
+                    jpegBuffer[i] = null;
+                    timestampBuffer[i] = 0;
+                }
+                writeIndex.set(0);
+                frameCount.set(0);
             }
 
             // Start new capture task at new rate
@@ -421,15 +496,20 @@ public class VideoRecorder
                 frameIntervalMs,
                 TimeUnit.MILLISECONDS
             );
+
+            // Mark as recording if we weren't before (switching from Screenshot Only)
+            isRecording.set(true);
         }
     }
 
     // Default post-event duration in milliseconds
-    private static final int DEFAULT_POST_EVENT_MS = 2000;
+    // 4 seconds post-event gives time for interfaces/celebrations to appear
+    // (6 seconds pre-event + 4 seconds post-event = 10 seconds total)
+    private static final int DEFAULT_POST_EVENT_MS = 4000;
 
     /**
      * Triggers a video/screenshot capture for an event based on configured quality settings.
-     * Uses default 2-second post-event duration.
+     * Uses default 4-second post-event duration to capture celebration animations.
      *
      * @param callback Called when capture is complete with base64-encoded screenshot and optionally MP4 video
      */
@@ -440,7 +520,7 @@ public class VideoRecorder
 
     /**
      * Triggers a video/screenshot capture for an event based on configured quality settings.
-     * Uses default 2-second post-event duration.
+     * Uses default 4-second post-event duration to capture celebration animations.
      *
      * @param callback Called when capture is complete with base64-encoded screenshot and optionally MP4 video
      * @param onEncodingStart Optional callback fired when encoding begins (after recording stops)
@@ -455,7 +535,7 @@ public class VideoRecorder
      *
      * @param callback Called when capture is complete with base64-encoded screenshot and optionally MP4 video
      * @param onEncodingStart Optional callback fired when encoding begins (after recording stops)
-     * @param postEventMs Duration in milliseconds to continue recording after the event (default 2000ms)
+     * @param postEventMs Duration in milliseconds to continue recording after the event (default 4000ms)
      */
     public void captureEventVideo(VideoCallback callback, Runnable onEncodingStart, int postEventMs)
     {
@@ -583,8 +663,9 @@ public class VideoRecorder
             return;
         }
 
-        // Check for sensitive content BEFORE requesting frame
-        final boolean shouldBlur = isSensitiveContentVisible();
+        // Use cached sensitive content check - only update periodically to reduce overhead
+        // Widget lookups are expensive, so we cache the result for 500ms
+        final boolean shouldBlur = getCachedSensitiveContentVisible(currentTime);
 
         // Increment pending count before requesting frame
         pendingEncodes.incrementAndGet();

@@ -132,19 +132,66 @@ public class ItemSnitchButton
     }
 
     /**
+     * Removes any existing Item Snitch buttons from the parent widget.
+     * This prevents duplicate buttons when the bank UI is rebuilt multiple times.
+     *
+     * @param parent The parent widget to search for existing buttons
+     */
+    private void removeExistingButtons(Widget parent)
+    {
+        if (parent == null)
+        {
+            return;
+        }
+
+        Widget[] children = parent.getDynamicChildren();
+        if (children == null)
+        {
+            return;
+        }
+
+        int removedCount = 0;
+        int snitchIconId = ItemSnitchSprites.SNITCH_ICON.getSpriteId();
+        int snitchIconActiveId = ItemSnitchSprites.SNITCH_ICON_ACTIVE.getSpriteId();
+
+        for (Widget child : children)
+        {
+            if (child == null)
+            {
+                continue;
+            }
+
+            // Check if this is one of our buttons by sprite ID
+            int spriteId = child.getSpriteId();
+            if (spriteId == snitchIconId || spriteId == snitchIconActiveId)
+            {
+                // Hide and "remove" the widget by making it invisible and non-interactive
+                child.setHidden(true);
+                child.setOriginalWidth(0);
+                child.setOriginalHeight(0);
+                child.setHasListener(false);
+                child.setOnOpListener((Object[]) null);
+                child.revalidate();
+                removedCount++;
+            }
+        }
+
+        if (removedCount > 0)
+        {
+            log.debug("Cleaned up {} existing Item Snitch button(s)", removedCount);
+        }
+
+        // Clear our reference since we've cleaned up
+        snitchButton = null;
+    }
+
+    /**
      * Creates the snitch button in the bank interface.
      * Uses the same approach as RuneLite's bank tags plugin - creates a child widget
      * on the ITEMS_CONTAINER and positions it relative to other bank elements.
      */
     private void createButton()
     {
-        // Check if we already have a button
-        if (snitchButton != null)
-        {
-            log.debug("Button already exists, skipping creation");
-            return;
-        }
-
         log.debug("Creating Item Snitch button...");
 
         // Try using the bank FRAME widget as the parent (the main bank window)
@@ -159,6 +206,10 @@ public class ItemSnitchButton
             log.warn("No suitable parent widget found");
             return;
         }
+
+        // Clean up any existing Item Snitch buttons to prevent duplicates
+        // When the bank rebuilds, old widget children may still exist
+        removeExistingButtons(parent);
 
         log.debug("Using parent widget: {} (size: {}x{})",
             parent.getId(), parent.getWidth(), parent.getHeight());

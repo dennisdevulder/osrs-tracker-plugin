@@ -51,6 +51,8 @@ import com.osrstracker.clue.ClueScrollTracker;
 import com.osrstracker.itemsnitch.ItemSnitchTracker;
 import com.osrstracker.itemsnitch.ItemSnitchBankOverlay;
 import com.osrstracker.itemsnitch.ItemSnitchButton;
+import com.osrstracker.bingo.BingoSubscriptionManager;
+import com.osrstracker.bingo.BingoProgressReporter;
 import com.osrstracker.video.VideoRecorder;
 import net.runelite.client.ui.overlay.OverlayManager;
 
@@ -130,6 +132,12 @@ public class OsrsTrackerPlugin extends Plugin
     private VideoRecorder videoRecorder;
 
     @Inject
+    private BingoSubscriptionManager bingoSubscriptionManager;
+
+    @Inject
+    private BingoProgressReporter bingoProgressReporter;
+
+    @Inject
     private OverlayManager overlayManager;
 
     @Inject
@@ -177,10 +185,11 @@ public class OsrsTrackerPlugin extends Plugin
             skillLevelTracker.initializeSkillLevels();
             questTracker.initializeQuestTracking();
             itemSnitchTracker.initialize();
+            bingoSubscriptionManager.initialize();
         }
 
-        // Create the sidebar panel with quick capture button
-        panel = new OsrsTrackerPanel(this::triggerQuickCapture);
+        // Create the sidebar panel with quick capture button and bingo manager
+        panel = new OsrsTrackerPanel(this::triggerQuickCapture, bingoSubscriptionManager);
 
         // Load icon for sidebar
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "quick_capture_icon.png");
@@ -251,6 +260,7 @@ public class OsrsTrackerPlugin extends Plugin
         skillLevelTracker.resetSkillTracking();
         questTracker.resetQuestTracking();
         itemSnitchTracker.reset();
+        bingoSubscriptionManager.reset();
     }
 
     /**
@@ -408,6 +418,8 @@ public class OsrsTrackerPlugin extends Plugin
                 skillLevelTracker.initializeSkillLevels();
                 questTracker.initializeQuestTracking();
                 itemSnitchTracker.initialize();
+                bingoSubscriptionManager.initialize();
+                panel.updateBingoSection();
             }
             // else: already in an active session, skip re-initialization
         }
@@ -421,6 +433,7 @@ public class OsrsTrackerPlugin extends Plugin
                 skillLevelTracker.resetSkillTracking();
                 questTracker.resetQuestTracking();
                 itemSnitchTracker.reset();
+                bingoSubscriptionManager.reset();
             }
         }
         else if (state == GameState.HOPPING)
@@ -511,17 +524,30 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle actor deaths - delegate to death tracker.
+     * Handle actor deaths - delegate to death tracker and bingo reporter.
      */
     @Subscribe
     public void onActorDeath(ActorDeath actorDeath)
     {
-        if (!config.trackDeaths())
+        Actor actor = actorDeath.getActor();
+
+        // Track player deaths for timeline
+        if (config.trackDeaths())
         {
-            return;
+            deathTracker.processActorDeath(actor);
         }
 
-        deathTracker.processActorDeath(actorDeath.getActor());
+        // Track NPC deaths for bingo (boss kills, NPC kills)
+        if (actor instanceof NPC)
+        {
+            NPC npc = (NPC) actor;
+            int npcId = npc.getId();
+            String npcName = npc.getName();
+
+            // Report to bingo if subscribed (checks internally)
+            bingoProgressReporter.reportBossKill(npcId, npcName);
+            bingoProgressReporter.reportNpcKill(npcId, npcName);
+        }
     }
 
     /**
@@ -614,7 +640,7 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle game ticks - check for quality setting changes.
+     * Handle game ticks - check for quality setting changes and bingo refresh.
      */
     @Subscribe
     public void onGameTick(GameTick gameTick)
@@ -624,6 +650,9 @@ public class OsrsTrackerPlugin extends Plugin
 
         // Handle delayed quest sync
         questTracker.onGameTick();
+
+        // Check for bingo subscription refresh (polls every 5 min if active event)
+        bingoSubscriptionManager.checkForRefresh();
     }
 
     /**

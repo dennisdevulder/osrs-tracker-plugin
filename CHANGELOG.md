@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Bingo Event Tracking System**
+  - Automatically fetches subscription data from API on login
+  - Smart polling: fetches every 5 min if active event, skips if no event in next 6 hours
+  - Sidebar panel now shows active bingo event status (name, tracking status, tile progress)
+  - Reports boss kills, NPC kills, loot drops, and clue completions to bingo progress API
+  - Captures proof screenshots at milestone intervals automatically
+  - Silent progress updates (doesn't spam timeline, just updates bingo counts)
+
+### Fixed
+- Screenshot Only mode not stopping frame capture
+  - When switching to Screenshot Only, the capture task kept running at the previous FPS
+  - Now properly cancels capture task and clears buffer when switching to Screenshot Only
+  - FPS should return to normal immediately when selecting Screenshot Only
+- Item Snitch button duplicating when opening/closing bank multiple times
+  - Old button widgets weren't being removed when bank UI was rebuilt
+  - Now properly cleans up existing buttons before creating new ones
+
+### Performance
+- Reduced FPS impact from video recording
+  - Cached sensitive content detection (widget lookups) - now checked every 500ms instead of every frame
+  - At 30 FPS, this reduces widget lookups from 30/sec to 2/sec
+  - Should reduce FPS drop from ~35 FPS to ~10-15 FPS during recording
+
 ## [0.1.1] - 2025-01-29
 
 ### Fixed
