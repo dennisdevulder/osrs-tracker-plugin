@@ -51,7 +51,11 @@ public class ApiClient
     @Inject
     public ApiClient(OkHttpClient httpClient, OsrsTrackerConfig config, Gson gson)
     {
-        this.httpClient = httpClient;
+        // Create our own client without disk cache to avoid RuneLite cache conflicts
+        // The shared RuneLite client uses disk caching which can fail on Windows
+        this.httpClient = httpClient.newBuilder()
+            .cache(null)  // Disable disk cache for our API calls
+            .build();
         this.config = config;
         this.gson = gson;
     }

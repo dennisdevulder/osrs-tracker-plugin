@@ -117,7 +117,10 @@ public class ItemSnitchTracker
         this.apiClient = apiClient;
         this.itemManager = itemManager;
         this.chatMessageManager = chatMessageManager;
-        this.httpClient = httpClient;
+        // Create our own client without disk cache to avoid RuneLite cache conflicts
+        this.httpClient = httpClient.newBuilder()
+            .cache(null)  // Disable disk cache for our API calls
+            .build();
         this.gson = gson;
     }
 

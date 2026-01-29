@@ -119,11 +119,18 @@ public class VideoRecorder
         this.drawManager = drawManager;
         this.config = config;
         this.client = client;
-        this.httpClient = httpClient;
         this.gson = gson;
+
+        // Create our own client without disk cache to avoid RuneLite cache conflicts
+        // The shared RuneLite client uses disk caching which can fail on Windows due to
+        // file locking issues, causing presigned URL requests to fail
+        this.httpClient = httpClient.newBuilder()
+            .cache(null)  // Disable disk cache for our API calls
+            .build();
 
         // Create a separate client with longer timeouts for large video uploads
         this.uploadClient = httpClient.newBuilder()
+            .cache(null)  // Disable disk cache
             .connectTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(5, TimeUnit.MINUTES)  // 5 min for large uploads
             .readTimeout(5, TimeUnit.MINUTES)
@@ -456,6 +463,18 @@ public class VideoRecorder
         {
             log.warn("Cannot capture event: recording not active");
             callback.onComplete(null, null);
+            return;
+        }
+
+        // Guard against overlapping captures - fall back to screenshot if already capturing
+        if (isCapturingPostEvent.get())
+        {
+            log.warn("Already capturing post-event video, falling back to screenshot");
+            if (onEncodingStart != null)
+            {
+                onEncodingStart.run();
+            }
+            captureScreenshotOnly(callback);
             return;
         }
 

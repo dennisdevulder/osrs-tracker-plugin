@@ -31,12 +31,9 @@ import com.osrstracker.api.ApiClient;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
-import net.runelite.api.events.ChatMessage;
-import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.callback.ClientThread;
-import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
 
 import javax.inject.Inject;
@@ -95,23 +92,19 @@ public class ClueScrollTracker
     }
 
     /**
-     * Listen for clue completion chat messages to capture the tier and count.
+     * Process a game chat message to capture clue completion info.
      * This message appears just before the reward widget opens.
+     * Called by the main plugin's onChatMessage handler.
+     *
+     * @param message The chat message text (should already have HTML tags removed)
      */
-    @Subscribe
-    public void onChatMessage(ChatMessage event)
+    public void processGameMessage(String message)
     {
-        if (event.getType() != ChatMessageType.GAMEMESSAGE)
-        {
-            return;
-        }
-
         if (!config.trackClueScrolls())
         {
             return;
         }
 
-        String message = net.runelite.client.util.Text.removeTags(event.getMessage());
         Matcher matcher = CLUE_COMPLETE_PATTERN.matcher(message);
 
         if (matcher.find())
@@ -129,18 +122,22 @@ public class ClueScrollTracker
     }
 
     /**
-     * Listen for the clue reward widget to load.
-     * When detected, capture the rewards and send to the API.
+     * Returns the widget group ID for the clue reward screen.
+     * Used by the main plugin to check if this tracker should handle the widget.
+     *
+     * @return The InterfaceID for TRAIL_REWARDSCREEN
      */
-    @Subscribe
-    public void onWidgetLoaded(WidgetLoaded event)
+    public int getRewardWidgetGroupId()
     {
-        // InterfaceID.TRAIL_REWARDSCREEN = 73 (treasure trail reward screen)
-        if (event.getGroupId() != InterfaceID.TRAIL_REWARDSCREEN)
-        {
-            return;
-        }
+        return InterfaceID.TRAIL_REWARDSCREEN;
+    }
 
+    /**
+     * Handle the clue reward widget being loaded.
+     * Called by the main plugin's onWidgetLoaded handler.
+     */
+    public void onRewardWidgetLoaded()
+    {
         if (!config.trackClueScrolls())
         {
             return;

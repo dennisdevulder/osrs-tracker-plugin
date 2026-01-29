@@ -153,6 +153,11 @@ public class OsrsTrackerPlugin extends Plugin
     private final AtomicLong lastCaptureCompletedTime = new AtomicLong(0);
     private ScheduledExecutorService cooldownExecutor;
 
+    // Track if we're in an active login session to prevent repeated re-initialization
+    // GameState.LOGGED_IN fires frequently during gameplay (region loads, interface closes, etc.)
+    // We only want to initialize trackers once per actual login, not on every state change
+    private volatile boolean sessionActive = false;
+
     @Override
     protected void startUp() throws Exception
     {
@@ -164,9 +169,11 @@ public class OsrsTrackerPlugin extends Plugin
         // Start video recording
         videoRecorder.startRecording();
 
-        // Initialize trackers when already logged in
+        // Initialize trackers when already logged in (plugin enabled mid-session)
         if (client.getGameState() == GameState.LOGGED_IN)
         {
+            log.info("Plugin started while logged in - initializing trackers");
+            sessionActive = true;
             skillLevelTracker.initializeSkillLevels();
             questTracker.initializeQuestTracking();
             itemSnitchTracker.initialize();
@@ -239,7 +246,8 @@ public class OsrsTrackerPlugin extends Plugin
         // Stop video recording
         videoRecorder.stopRecording();
 
-        // Reset all trackers
+        // Reset session state and all trackers
+        sessionActive = false;
         skillLevelTracker.resetSkillTracking();
         questTracker.resetQuestTracking();
         itemSnitchTracker.reset();
@@ -380,22 +388,50 @@ public class OsrsTrackerPlugin extends Plugin
 
     /**
      * Handle login events - initialize all trackers.
+     *
+     * IMPORTANT: GameState.LOGGED_IN fires frequently during gameplay (region loads,
+     * interface closes, cutscenes, etc.), not just on actual login. We use sessionActive
+     * to ensure we only initialize once per actual login session.
      */
     @Subscribe
     public void onGameStateChanged(GameStateChanged gameStateChanged)
     {
-        if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
+        GameState state = gameStateChanged.getGameState();
+
+        if (state == GameState.LOGGED_IN)
         {
-            skillLevelTracker.initializeSkillLevels();
-            questTracker.initializeQuestTracking();
-            itemSnitchTracker.initialize();
+            // Only initialize if this is the start of a new session
+            if (!sessionActive)
+            {
+                log.info("New login session detected - initializing trackers");
+                sessionActive = true;
+                skillLevelTracker.initializeSkillLevels();
+                questTracker.initializeQuestTracking();
+                itemSnitchTracker.initialize();
+            }
+            // else: already in an active session, skip re-initialization
         }
-        else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN ||
-                 gameStateChanged.getGameState() == GameState.HOPPING)
+        else if (state == GameState.LOGIN_SCREEN)
         {
-            // Reset trackers on logout
-            questTracker.resetQuestTracking();
-            itemSnitchTracker.reset();
+            // Full logout - reset session and all trackers
+            if (sessionActive)
+            {
+                log.info("Logout detected - resetting session and trackers");
+                sessionActive = false;
+                skillLevelTracker.resetSkillTracking();
+                questTracker.resetQuestTracking();
+                itemSnitchTracker.reset();
+            }
+        }
+        else if (state == GameState.HOPPING)
+        {
+            // World hop - reset session so we re-initialize after hop completes
+            // This ensures we capture fresh skill levels on the new world
+            if (sessionActive)
+            {
+                log.info("World hop detected - will re-initialize after hop");
+                sessionActive = false;
+            }
         }
     }
 
@@ -410,11 +446,16 @@ public class OsrsTrackerPlugin extends Plugin
             return;
         }
 
-        skillLevelTracker.checkForLevelUp(statChanged.getSkill());
+        Skill skill = statChanged.getSkill();
+        int level = statChanged.getLevel();
+        int xp = statChanged.getXp();
+        log.debug("StatChanged: {} level={} xp={}", skill.getName(), level, xp);
+
+        skillLevelTracker.checkForLevelUp(skill);
     }
 
     /**
-     * Handle chat messages - delegate to collection log tracker.
+     * Handle chat messages - delegate to collection log and clue scroll trackers.
      */
     @Subscribe
     public void onChatMessage(ChatMessage chatMessage)
@@ -430,6 +471,12 @@ public class OsrsTrackerPlugin extends Plugin
         if (config.trackCollectionLog())
         {
             collectionLogTracker.processGameMessage(message);
+        }
+
+        // Check for clue scroll completion messages
+        if (config.trackClueScrolls())
+        {
+            clueScrollTracker.processGameMessage(message);
         }
     }
 
@@ -478,7 +525,7 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle widget loaded events - for bank open detection.
+     * Handle widget loaded events - for bank open and clue scroll reward detection.
      */
     @Subscribe
     public void onWidgetLoaded(WidgetLoaded event)
@@ -488,6 +535,12 @@ public class OsrsTrackerPlugin extends Plugin
         {
             itemSnitchTracker.onBankOpen();
             itemSnitchButton.onBankOpen();
+        }
+
+        // Check for clue scroll reward widget
+        if (config.trackClueScrolls() && event.getGroupId() == clueScrollTracker.getRewardWidgetGroupId())
+        {
+            clueScrollTracker.onRewardWidgetLoaded();
         }
     }
 
