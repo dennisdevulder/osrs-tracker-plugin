@@ -84,7 +84,7 @@ public class ApiClient
         String apiUrl = OsrsTrackerConfig.getEffectiveApiUrl();
         String apiToken = config.apiToken();
 
-        log.info("Sending {} to API URL: {}", eventDescription, apiUrl);
+        log.debug("Sending {} to API URL: {}", eventDescription, apiUrl);
 
         // Validate configuration before attempting to send
         if (!isConfigurationValid())
@@ -142,7 +142,7 @@ public class ApiClient
                 {
                     if (response.isSuccessful())
                     {
-                        log.info("Successfully sent {} to OSRS Tracker", eventDescription);
+                        log.debug("Successfully sent {} to OSRS Tracker", eventDescription);
                     }
                     else
                     {

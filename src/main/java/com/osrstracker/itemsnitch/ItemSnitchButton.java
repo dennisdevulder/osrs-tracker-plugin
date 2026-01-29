@@ -104,7 +104,7 @@ public class ItemSnitchButton
      */
     public void onBankOpen()
     {
-        log.info("Bank widget loaded - resetting state");
+        log.debug("Bank widget loaded - resetting state");
         // Only reset filter state, don't touch snitchButton here as
         // onBankFinishedBuilding may have already created it
         filterActive = false;
@@ -116,7 +116,7 @@ public class ItemSnitchButton
      */
     public void onBankFinishedBuilding()
     {
-        log.info("Bank finished building - creating Item Snitch button");
+        log.debug("Bank finished building - creating Item Snitch button");
         // Reset button reference before creating new one
         snitchButton = null;
         createButton();
@@ -145,7 +145,7 @@ public class ItemSnitchButton
             return;
         }
 
-        log.info("Creating Item Snitch button...");
+        log.debug("Creating Item Snitch button...");
 
         // Try using the bank FRAME widget as the parent (the main bank window)
         Widget parent = client.getWidget(InterfaceID.Bankmain.FRAME);
@@ -160,7 +160,7 @@ public class ItemSnitchButton
             return;
         }
 
-        log.info("Using parent widget: {} (size: {}x{})",
+        log.debug("Using parent widget: {} (size: {}x{})",
             parent.getId(), parent.getWidth(), parent.getHeight());
 
         // Create the button widget as a child of the parent
@@ -176,14 +176,14 @@ public class ItemSnitchButton
         int buttonX = parent.getWidth() - BUTTON_SIZE - 100;  // 100px from right edge
         int buttonY = 8;  // Vertically centered in title bar area
 
-        log.info("Positioning button at ({}, {}) on parent (size: {}x{})",
+        log.debug("Positioning button at ({}, {}) on parent (size: {}x{})",
             buttonX, buttonY, parent.getWidth(), parent.getHeight());
 
         // Configure the button
         // Try using a standard game sprite first to test visibility (SpriteID.TAB_QUESTS = 776)
         // If this works, then we know the issue is with our custom sprite
         int spriteId = ItemSnitchSprites.SNITCH_ICON.getSpriteId();
-        log.info("Setting sprite ID: {} (custom sprite)", spriteId);
+        log.debug("Setting sprite ID: {} (custom sprite)", spriteId);
 
         snitchButton.setSpriteId(spriteId);
         snitchButton.setOriginalWidth(BUTTON_SIZE);
@@ -210,7 +210,7 @@ public class ItemSnitchButton
 
         snitchButton.revalidate();
 
-        log.info("Created Item Snitch button at position ({}, {}) on ITEMS_CONTAINER (parent size: {}x{})",
+        log.debug("Created Item Snitch button at position ({}, {}) on ITEMS_CONTAINER (parent size: {}x{})",
             buttonX, buttonY, parent.getWidth(), parent.getHeight());
     }
 
@@ -220,7 +220,7 @@ public class ItemSnitchButton
     private void onButtonClick(ScriptEvent event)
     {
         filterActive = !filterActive;
-        log.info("Item Snitch filter toggled: {}", filterActive);
+        log.debug("Item Snitch filter toggled: {}", filterActive);
 
         // Update button appearance
         updateButtonState();

@@ -139,7 +139,7 @@ public class ItemSnitchTracker
             return;
         }
 
-        log.info("Initializing Item Snitch tracker...");
+        log.debug("Initializing Item Snitch tracker...");
         fetchSharedItemsFromApi();
     }
 
@@ -363,7 +363,7 @@ public class ItemSnitchTracker
             .runeLiteFormattedMessage(coloredMessage)
             .build());
 
-        log.info("Warned player about {} shared items in bank", currentBankSharedItems.size());
+        log.debug("Warned player about {} shared items in bank", currentBankSharedItems.size());
     }
 
     /**
@@ -421,7 +421,7 @@ public class ItemSnitchTracker
         );
 
         reportSentThisSession = true;
-        log.info("Updated last_seen for {} shared items", currentBankSharedItems.size());
+        log.debug("Updated last_seen for {} shared items", currentBankSharedItems.size());
     }
 
     /**
@@ -492,7 +492,7 @@ public class ItemSnitchTracker
             boolean hasIronmanGroup = json.has("has_ironman_group") && json.get("has_ironman_group").getAsBoolean();
             if (!hasIronmanGroup)
             {
-                log.info("Item Snitch disabled: No Group Ironman or Hardcore Group Ironman groups found");
+                log.debug("Item Snitch disabled: No Group Ironman or Hardcore Group Ironman groups found");
                 initialized = false;
                 return;
             }
@@ -563,7 +563,7 @@ public class ItemSnitchTracker
                 sharedItemsMap.put(sharedItem.getItemId(), sharedItem);
             }
 
-            log.info("Loaded {} shared items ({} total IDs including variants) to track from API",
+            log.debug("Loaded {} shared items ({} total IDs including variants) to track from API",
                 sharedItemsMap.size(), totalVariants);
 
             // Mark as initialized AFTER we have the data

@@ -32,3 +32,4 @@ runelite-cache/
 
 # Local development
 .claude/
+.env

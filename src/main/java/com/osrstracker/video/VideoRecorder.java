@@ -388,7 +388,7 @@ public class VideoRecorder
         // Update JPEG quality if changed (takes effect on next frame)
         if (targetJpegQuality != currentJpegQuality)
         {
-            log.info("Quality setting changed, updating JPEG quality from {}% to {}%",
+            log.debug("Quality setting changed, updating JPEG quality from {}% to {}%",
                 (int)(currentJpegQuality * 100), (int)(targetJpegQuality * 100));
             currentJpegQuality = targetJpegQuality;
         }
@@ -396,7 +396,7 @@ public class VideoRecorder
         // Update FPS if changed (requires restarting capture task)
         if (targetFps != currentCaptureFps)
         {
-            log.info("Quality setting changed, updating capture rate from {} to {} FPS", currentCaptureFps, targetFps);
+            log.debug("Quality setting changed, updating capture rate from {} to {} FPS", currentCaptureFps, targetFps);
 
             // Cancel current capture task
             if (captureTask != null)
@@ -464,7 +464,7 @@ public class VideoRecorder
         // Check if screenshot-only mode
         if (quality == VideoQuality.SCREENSHOT_ONLY)
         {
-            log.info("Event triggered, capturing screenshot only (Screenshot Only mode)");
+            log.debug("Event triggered, capturing screenshot only (Screenshot Only mode)");
             if (onEncodingStart != null)
             {
                 onEncodingStart.run();
@@ -483,7 +483,7 @@ public class VideoRecorder
             bufferMs = 1000;
         }
 
-        log.info("Event triggered, capturing {}-second video ({}s buffer + {}s post-event) at {} FPS",
+        log.debug("Event triggered, capturing {}-second video ({}s buffer + {}s post-event) at {} FPS",
             durationMs / 1000, bufferMs / 1000, postEventMs / 1000, quality.getFps());
 
         isCapturingPostEvent.set(true);
@@ -528,11 +528,11 @@ public class VideoRecorder
                     if (shouldBlur)
                     {
                         screenshot = applyHeavyBlur(screenshot);
-                        log.info("Screenshot blurred due to sensitive content");
+                        log.debug("Screenshot blurred due to sensitive content");
                     }
 
                     String screenshotBase64 = imageToBase64(screenshot);
-                    log.info("Screenshot captured successfully");
+                    log.debug("Screenshot captured successfully");
                     callback.onComplete(screenshotBase64, null);
                 }
                 catch (Exception e)
@@ -566,11 +566,6 @@ public class VideoRecorder
 
         // Check for sensitive content BEFORE requesting frame
         final boolean shouldBlur = isSensitiveContentVisible();
-
-        if (shouldBlur)
-        {
-            log.debug("Sensitive content detected, frame will be blurred");
-        }
 
         // Increment pending count before requesting frame
         pendingEncodes.incrementAndGet();
@@ -646,9 +641,6 @@ public class VideoRecorder
 
                 targetWidth = (int) (sourceWidth * scaleFactor);
                 targetHeight = (int) (sourceHeight * scaleFactor);
-
-                log.debug("Scaling frame from {}x{} to {}x{} (factor: {})",
-                    sourceWidth, sourceHeight, targetWidth, targetHeight, scaleFactor);
             }
 
             // Create BufferedImage at target resolution (capped at 1080p)
@@ -712,7 +704,7 @@ public class VideoRecorder
      */
     private void finalizeCapture(VideoCallback callback, long videoStartTime, long videoEndTime)
     {
-        log.info("Finalizing video capture for time window: {} to {} ({}ms duration)",
+        log.debug("Finalizing video capture for time window: {} to {} ({}ms duration)",
             videoStartTime, videoEndTime, videoEndTime - videoStartTime);
 
         // Check for sensitive content before capturing final screenshot
@@ -729,7 +721,7 @@ public class VideoRecorder
                     if (shouldBlur)
                     {
                         screenshot = applyHeavyBlur(screenshot);
-                        log.info("Final screenshot blurred due to sensitive content");
+                        log.debug("Final screenshot blurred due to sensitive content");
                     }
 
                     String screenshotBase64 = imageToBase64(screenshot);
@@ -739,7 +731,7 @@ public class VideoRecorder
 
                     if (uploadTask != null)
                     {
-                        log.info("Uploading {} frames to {}", uploadTask.frames.size(), uploadTask.key);
+                        log.debug("Uploading {} frames to {}", uploadTask.frames.size(), uploadTask.key);
 
                         // Store screenshot for use after upload
                         final String finalScreenshot = screenshotBase64;
@@ -749,7 +741,7 @@ public class VideoRecorder
                             boolean success = uploadFramesToBackblaze(uploadTask.uploadUrl, uploadTask.frames, uploadTask.fps);
                             if (success)
                             {
-                                log.info("Upload complete - sending callback with key {}", uploadTask.key);
+                                log.debug("Upload complete - sending callback with key {}", uploadTask.key);
                                 callback.onComplete(finalScreenshot, uploadTask.key);
                             }
                             else
@@ -822,7 +814,7 @@ public class VideoRecorder
             return null;
         }
 
-        log.info("Snapshotted {} frames for clip", clipFrames.size());
+        log.debug("Snapshotted {} frames for clip", clipFrames.size());
 
         // Get presigned URL (fast API call) - FPS is encoded in the filename
         int fps = config.videoQuality().getFps();
@@ -833,7 +825,7 @@ public class VideoRecorder
             return null;
         }
 
-        log.info("Got presigned URL for async upload: {}", presignedUrl.key);
+        log.debug("Got presigned URL for async upload: {}", presignedUrl.key);
 
         UploadTask task = new UploadTask();
         task.uploadUrl = presignedUrl.uploadUrl;
@@ -934,10 +926,10 @@ public class VideoRecorder
             }
 
             byte[] mjpegBytes = mjpegBuffer.toByteArray();
-            log.info("Created MJPEG stream: {} bytes ({} frames)", mjpegBytes.length, frames.size());
+            log.debug("Created MJPEG stream: {} bytes ({} frames)", mjpegBytes.length, frames.size());
 
             // Upload directly to Backblaze using presigned URL
-            log.info("Starting direct upload to Backblaze ({} bytes)...", mjpegBytes.length);
+            log.debug("Starting direct upload to Backblaze ({} bytes)...", mjpegBytes.length);
 
             RequestBody body = RequestBody.create(MediaType.parse("application/octet-stream"), mjpegBytes);
 
@@ -955,7 +947,7 @@ public class VideoRecorder
                 String responseBody = response.body() != null ? response.body().string() : "null";
                 if (response.isSuccessful())
                 {
-                    log.info("Successfully uploaded {} bytes directly to Backblaze", mjpegBytes.length);
+                    log.debug("Successfully uploaded {} bytes directly to Backblaze", mjpegBytes.length);
                     return true;
                 }
                 else
