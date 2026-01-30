@@ -188,6 +188,18 @@ public class BingoSubscriptionManager
                                 subscription.getSubscriptions().getBossIds().size(),
                                 subscription.getSubscriptions().getNpcIds().size(),
                                 subscription.getSubscriptions().getItemIds().size());
+
+                            // Log tile progress with proof milestones
+                            for (BingoSubscription.TileProgress tile : subscription.getTileProgress())
+                            {
+                                log.info("  Tile {}: {} - count={}/{}, nextProofMilestone={}, proofInterval={}",
+                                    tile.getTileId(),
+                                    tile.getDescription(),
+                                    tile.getCurrentCount(),
+                                    tile.getRequiredCount(),
+                                    tile.getNextProofMilestone(),
+                                    tile.getProofInterval());
+                            }
                         }
                         else
                         {
@@ -399,6 +411,7 @@ public class BingoSubscriptionManager
     {
         if (!hasActiveEvent())
         {
+            log.debug("needsProofForNpcKill: No active event");
             return false;
         }
 
@@ -416,9 +429,18 @@ public class BingoSubscriptionManager
                 List<Number> ids = (List<Number>) npcIds;
                 boolean matches = ids.stream().anyMatch(id -> id.intValue() == npcId);
 
-                if (matches && tile.needsProofAtCount(tile.getCurrentCount() + 1))
+                if (matches)
                 {
-                    return true;
+                    int currentCount = tile.getCurrentCount();
+                    Integer nextMilestone = tile.getNextProofMilestone();
+                    boolean needsProof = tile.needsProofAtCount(currentCount + 1);
+                    log.info("Tile {} ({}): currentCount={}, nextMilestone={}, checkCount={}, needsProof={}",
+                        tile.getTileId(), tile.getDescription(), currentCount, nextMilestone, currentCount + 1, needsProof);
+
+                    if (needsProof)
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -434,6 +456,7 @@ public class BingoSubscriptionManager
     {
         if (subscription == null || subscription.getTileProgress() == null)
         {
+            log.warn("Cannot update tile progress: subscription or tileProgress is null");
             return;
         }
 
@@ -441,9 +464,12 @@ public class BingoSubscriptionManager
         {
             if (tile.getTileId() == tileId)
             {
+                int oldCount = tile.getCurrentCount();
+                Integer oldMilestone = tile.getNextProofMilestone();
                 tile.setCurrentCount(newCount);
                 tile.setNextProofMilestone(nextProofMilestone);
-                log.debug("Updated tile {} progress: {}/{}", tileId, newCount, tile.getRequiredCount());
+                log.info("Updated tile {} ({}): count {} -> {}, nextMilestone {} -> {}",
+                    tileId, tile.getDescription(), oldCount, newCount, oldMilestone, nextProofMilestone);
                 break;
             }
         }

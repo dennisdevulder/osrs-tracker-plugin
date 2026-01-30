@@ -37,6 +37,8 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ServerNpcLoot;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStack;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
@@ -58,6 +60,8 @@ import net.runelite.client.ui.overlay.OverlayManager;
 
 import javax.inject.Inject;
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -88,6 +92,20 @@ import java.util.concurrent.atomic.AtomicLong;
 )
 public class OsrsTrackerPlugin extends Plugin
 {
+    // Gauntlet boss NPC IDs (multiple forms/states for each)
+    private static final int[] CRYSTALLINE_HUNLLEF_IDS = {9021, 9022, 9023, 9024};
+    private static final int[] CORRUPTED_HUNLLEF_IDS = {9035, 9036, 9037, 9038};
+
+    // Raid boss NPC IDs (final boss of each raid)
+    // CoX - Great Olm head (both phase variants)
+    private static final int[] GREAT_OLM_HEAD_IDS = {7551, 7554};
+    // ToB - Verzik Vitur phase 3 (both variants)
+    private static final int[] VERZIK_VITUR_P3_IDS = {8374, 8375};
+    // ToA - Tumeken's Warden (damaged/enraged states)
+    private static final int[] TUMEKENS_WARDEN_IDS = {11762, 11764};
+    // ToA - Elidinis' Warden (damaged/enraged states)
+    private static final int[] ELIDINIS_WARDEN_IDS = {11761, 11763};
+
     @Inject
     private Client client;
 
@@ -148,6 +166,9 @@ public class OsrsTrackerPlugin extends Plugin
 
     @Inject
     private ConfigManager configManager;
+
+    @Inject
+    private ItemManager itemManager;
 
     // Sidebar navigation button and panel for quick capture
     private NavigationButton quickCaptureButton;
@@ -491,6 +512,140 @@ public class OsrsTrackerPlugin extends Plugin
         {
             clueScrollTracker.processGameMessage(message);
         }
+
+        // Check for slayer task completion
+        checkForSlayerTaskCompletion(message);
+
+        // Check for raid completion (fallback if NPC death detection fails)
+        checkForRaidCompletion(message);
+    }
+
+    /**
+     * Pattern to match raid completion messages.
+     * CoX/ToB/ToA all use: "Congratulations - your raid is complete!"
+     * Also matches ToA specific: "You have completed the Tombs of Amascut"
+     */
+    private static final java.util.regex.Pattern RAID_COMPLETE_PATTERN =
+        java.util.regex.Pattern.compile("Congratulations - your raid is complete!");
+    private static final java.util.regex.Pattern TOA_COMPLETE_PATTERN =
+        java.util.regex.Pattern.compile("You have completed the Tombs of Amascut");
+
+    // Track recent raid completions to avoid duplicate reports (NPC death + chat message)
+    private long lastRaidCompletionTime = 0;
+    private static final long RAID_COMPLETION_COOLDOWN_MS = 5000; // 5 second cooldown
+
+    /**
+     * Check if the message indicates a raid completion.
+     * This is a fallback for when NPC death detection doesn't work (e.g., Olm might be an Object).
+     */
+    private void checkForRaidCompletion(String message)
+    {
+        // Check cooldown to avoid duplicate reports
+        long now = System.currentTimeMillis();
+        if (now - lastRaidCompletionTime < RAID_COMPLETION_COOLDOWN_MS)
+        {
+            return;
+        }
+
+        if (RAID_COMPLETE_PATTERN.matcher(message).find())
+        {
+            // Determine which raid based on region/context
+            // For now, we'll detect the raid type based on common patterns
+            // The NPC death detection should usually catch this first
+            String raidName = detectCurrentRaid();
+            if (raidName != null)
+            {
+                log.info("Raid completion detected via chat message: {}", raidName);
+                lastRaidCompletionTime = now;
+                bingoProgressReporter.reportRaidComplete(raidName, true, 0, 0);
+            }
+        }
+        else if (TOA_COMPLETE_PATTERN.matcher(message).find())
+        {
+            log.info("ToA completion detected via chat message");
+            lastRaidCompletionTime = now;
+            bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
+        }
+    }
+
+    /**
+     * Try to detect which raid the player is currently in based on region ID.
+     */
+    private String detectCurrentRaid()
+    {
+        if (client.getGameState() != GameState.LOGGED_IN)
+        {
+            return null;
+        }
+
+        int regionId = client.getLocalPlayer() != null ?
+            client.getLocalPlayer().getWorldLocation().getRegionID() : 0;
+
+        // CoX regions (Chambers of Xeric)
+        if (isInCoxRegion(regionId))
+        {
+            return "Chambers of Xeric";
+        }
+        // ToB regions (Theatre of Blood)
+        else if (isInTobRegion(regionId))
+        {
+            return "Theatre of Blood";
+        }
+        // ToA regions (Tombs of Amascut)
+        else if (isInToaRegion(regionId))
+        {
+            return "Tombs of Amascut";
+        }
+
+        return null;
+    }
+
+    // CoX region IDs (approximate - Olm room and surrounding areas)
+    private boolean isInCoxRegion(int regionId)
+    {
+        return regionId >= 12889 && regionId <= 13210;
+    }
+
+    // ToB region IDs (Theatre of Blood)
+    private boolean isInTobRegion(int regionId)
+    {
+        return regionId >= 12611 && regionId <= 12869;
+    }
+
+    // ToA region IDs (Tombs of Amascut)
+    private boolean isInToaRegion(int regionId)
+    {
+        return regionId >= 14160 && regionId <= 15696;
+    }
+
+    /**
+     * Pattern to match slayer task completion messages.
+     * Examples:
+     * - "You have completed your task! You killed 150 Abyssal demons."
+     * - "You've completed your task! Contact a Slayer master for a new assignment."
+     */
+    private static final java.util.regex.Pattern SLAYER_TASK_PATTERN =
+        java.util.regex.Pattern.compile("You have completed your task! You killed (\\d+) (.+)\\.");
+
+    /**
+     * Check if the message indicates a slayer task completion.
+     */
+    private void checkForSlayerTaskCompletion(String message)
+    {
+        java.util.regex.Matcher matcher = SLAYER_TASK_PATTERN.matcher(message);
+        if (matcher.find())
+        {
+            int amount = Integer.parseInt(matcher.group(1));
+            String taskName = matcher.group(2);
+            log.info("Slayer task completed: {} x{}", taskName, amount);
+            bingoProgressReporter.reportSlayerTaskComplete(taskName, amount, "Unknown");
+        }
+        // Also check for the simpler message without kill count
+        else if (message.contains("You've completed your task"))
+        {
+            log.info("Slayer task completed (no details)");
+            bingoProgressReporter.reportSlayerTaskComplete("Unknown", 0, "Unknown");
+        }
     }
 
     /**
@@ -508,19 +663,50 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle loot drops - delegate to loot tracker.
+     * Handle loot drops - delegate to loot tracker and bingo reporter.
      */
     @Subscribe
     public void onServerNpcLoot(ServerNpcLoot event)
     {
-        if (!config.trackLoot())
+        NPCComposition npc = event.getComposition();
+        String npcName = (npc != null) ? npc.getName() : "Unknown";
+        int npcId = (npc != null) ? npc.getId() : -1;
+
+        // Process for timeline loot tracker (with value threshold)
+        if (config.trackLoot())
+        {
+            lootTracker.processLootDrop(npcName, event.getItems());
+        }
+
+        // Report to bingo (checks subscriptions internally)
+        reportLootToBingo(npcId, npcName, event.getItems());
+    }
+
+    /**
+     * Converts ItemStack collection to BingoProgressReporter.LootItem list and reports to bingo.
+     */
+    private void reportLootToBingo(int npcId, String npcName, java.util.Collection<ItemStack> items)
+    {
+        if (items == null || items.isEmpty())
         {
             return;
         }
 
-        NPCComposition npc = event.getComposition();
-        String npcName = (npc != null) ? npc.getName() : null;
-        lootTracker.processLootDrop(npcName, event.getItems());
+        List<BingoProgressReporter.LootItem> lootItems = new ArrayList<>();
+        long totalValue = 0;
+
+        for (ItemStack item : items)
+        {
+            int itemId = item.getId();
+            int quantity = item.getQuantity();
+            String itemName = itemManager.getItemComposition(itemId).getName();
+            long itemPrice = (long) itemManager.getItemPrice(itemId) * quantity;
+
+            lootItems.add(new BingoProgressReporter.LootItem(itemId, itemName, quantity, itemPrice));
+            totalValue += itemPrice;
+        }
+
+        bingoProgressReporter.reportLoot(npcId, npcName, lootItems, totalValue);
     }
 
     /**
@@ -537,17 +723,64 @@ public class OsrsTrackerPlugin extends Plugin
             deathTracker.processActorDeath(actor);
         }
 
-        // Track NPC deaths for bingo (boss kills, NPC kills)
+        // Track NPC deaths for bingo (boss kills, NPC kills, raids, gauntlet)
         if (actor instanceof NPC)
         {
             NPC npc = (NPC) actor;
             int npcId = npc.getId();
             String npcName = npc.getName();
 
+            // Check for Gauntlet completion (Hunllef death)
+            if (isNpcIdInArray(npcId, CRYSTALLINE_HUNLLEF_IDS))
+            {
+                log.info("Crystalline Hunllef defeated - Normal Gauntlet complete!");
+                bingoProgressReporter.reportGauntletComplete(false, true, 0, 0);
+            }
+            else if (isNpcIdInArray(npcId, CORRUPTED_HUNLLEF_IDS))
+            {
+                log.info("Corrupted Hunllef defeated - Corrupted Gauntlet complete!");
+                bingoProgressReporter.reportGauntletComplete(true, true, 0, 0);
+            }
+            // Check for Raid completion (final boss death)
+            // Set cooldown to prevent chat message fallback from double-reporting
+            else if (isNpcIdInArray(npcId, GREAT_OLM_HEAD_IDS))
+            {
+                log.info("Great Olm defeated - Chambers of Xeric complete!");
+                lastRaidCompletionTime = System.currentTimeMillis();
+                bingoProgressReporter.reportRaidComplete("Chambers of Xeric", true, 0, 0);
+            }
+            else if (isNpcIdInArray(npcId, VERZIK_VITUR_P3_IDS))
+            {
+                log.info("Verzik Vitur defeated - Theatre of Blood complete!");
+                lastRaidCompletionTime = System.currentTimeMillis();
+                bingoProgressReporter.reportRaidComplete("Theatre of Blood", true, 0, 0);
+            }
+            else if (isNpcIdInArray(npcId, TUMEKENS_WARDEN_IDS) || isNpcIdInArray(npcId, ELIDINIS_WARDEN_IDS))
+            {
+                log.info("Warden defeated - Tombs of Amascut complete!");
+                lastRaidCompletionTime = System.currentTimeMillis();
+                bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
+            }
+
             // Report to bingo if subscribed (checks internally)
             bingoProgressReporter.reportBossKill(npcId, npcName);
             bingoProgressReporter.reportNpcKill(npcId, npcName);
         }
+    }
+
+    /**
+     * Helper method to check if an NPC ID is in an array of IDs.
+     */
+    private boolean isNpcIdInArray(int npcId, int[] ids)
+    {
+        for (int id : ids)
+        {
+            if (id == npcId)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

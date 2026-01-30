@@ -12,9 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatically fetches subscription data from API on login
   - Smart polling: fetches every 5 min if active event, skips if no event in next 6 hours
   - Sidebar panel now shows active bingo event status (name, tracking status, tile progress)
-  - Reports boss kills, NPC kills, loot drops, and clue completions to bingo progress API
+  - Reports boss kills, NPC kills, and clue completions to bingo progress API
   - Captures proof screenshots at milestone intervals automatically
   - Silent progress updates (doesn't spam timeline, just updates bingo counts)
+- **Bingo Loot Item Tracking**
+  - Loot drops now report to bingo system for `loot_item` tile tracking
+  - Matches items by `item_id` (not name) for accurate tracking
+  - Counts item quantities (e.g., looting 2 bones = +2 progress)
+  - Independent of timeline loot tracking (no 100k minimum threshold)
+
+### Changed
+- Video capture timing adjusted from 8s pre + 2s post to 6s pre + 4s post
+  - Same 10 second total, but more post-event footage to capture celebrations/interfaces
+  - Death captures unchanged (still 5s post-event)
 
 ### Fixed
 - Screenshot Only mode not stopping frame capture

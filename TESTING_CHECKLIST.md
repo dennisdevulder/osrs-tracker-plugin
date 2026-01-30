@@ -184,9 +184,30 @@ This checklist covers all the fixes and improvements made in v0.1.1 and the unre
 - [ ] Log in while participating in an active bingo event
 - [ ] Check sidebar panel → should show event name and "● Tracking" in green
 - [ ] Check logs for: `"Bingo tracking active: [Event Name] (tracking X bosses, Y NPCs, Z items)"`
+
+### Boss Kill Tracking:
 - [ ] Kill a boss that's in your tile requirements
 - [ ] **Verify:** Log shows `"Reporting boss kill to bingo: [Boss Name]"`
 - [ ] Check the web dashboard → verify progress incremented
+
+### NPC Kill Tracking:
+- [ ] Create a tile with npc_kill_count trigger (e.g., "Kill 5 goblins")
+- [ ] Kill the specified NPC
+- [ ] **Verify:** Log shows `"Reporting NPC kill to bingo: [NPC Name]"`
+- [ ] Check the web dashboard → verify progress incremented
+
+### Loot Drop Tracking:
+- [ ] Create a tile with loot_item trigger (e.g., "Get 5x bones")
+- [ ] Kill NPCs that drop the item (e.g., goblins drop bones)
+- [ ] **Verify:** Log shows `"Reporting loot to bingo from [NPC Name]"`
+- [ ] Check the web dashboard → verify progress incremented
+- [ ] **Verify:** Loot tracking works independently of timeline loot tracking (no 100k minimum)
+
+### Combined Test (Kill + Loot):
+- [ ] Create two tiles: "Kill 5 goblins" + "Get 5x bones"
+- [ ] Kill 5 goblins (they drop bones every kill)
+- [ ] **Verify:** Both tiles complete simultaneously
+- [ ] **Verify:** Proof screenshots are captured for both
 
 ### Test Steps (no active event):
 - [ ] Log in without an active bingo event

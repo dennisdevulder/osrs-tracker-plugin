@@ -98,7 +98,7 @@ public class BingoProgressReporter
         if (needsProof)
         {
             log.debug("Capturing proof for boss kill milestone");
-            videoRecorder.captureScreenshotOnly(screenshot -> {
+            videoRecorder.captureScreenshotOnly((screenshot, videoKey) -> {
                 sendProgress("boss_kill", eventData, screenshot, null);
             });
         }
@@ -115,12 +115,14 @@ public class BingoProgressReporter
     {
         if (!subscriptionManager.shouldTrackNpcKill(npcId))
         {
+            log.debug("NPC {} ({}) is not tracked for bingo", npcName, npcId);
             return;
         }
 
-        log.debug("Reporting NPC kill to bingo: {} ({})", npcName, npcId);
+        log.info("Reporting NPC kill to bingo: {} ({})", npcName, npcId);
 
         boolean needsProof = subscriptionManager.needsProofForNpcKill(npcId);
+        log.info("needsProof={} for NPC kill {} ({})", needsProof, npcName, npcId);
 
         JsonObject eventData = new JsonObject();
         eventData.addProperty("npc_id", npcId);
@@ -128,13 +130,18 @@ public class BingoProgressReporter
 
         if (needsProof)
         {
-            log.debug("Capturing proof for NPC kill milestone");
-            videoRecorder.captureScreenshotOnly(screenshot -> {
-                sendProgress("npc_kill", eventData, screenshot, null);
-            });
+            log.info("CAPTURING VIDEO PROOF for NPC kill milestone: {} ({})", npcName, npcId);
+            // Use captureEventVideo to get video based on user's quality settings
+            videoRecorder.captureEventVideo((screenshot, videoKey) -> {
+                log.info("Proof captured (screenshot={}, video={}), sending progress",
+                    screenshot != null ? "yes" : "no",
+                    videoKey != null ? videoKey : "none");
+                sendProgress("npc_kill", eventData, screenshot, videoKey);
+            }, null);
         }
         else
         {
+            log.debug("Sending progress WITHOUT proof");
             sendProgress("npc_kill", eventData, null, null);
         }
     }
@@ -183,7 +190,7 @@ public class BingoProgressReporter
         eventData.add("items", itemsArray);
 
         // For loot, we usually want proof (it's a significant event)
-        videoRecorder.captureScreenshotOnly(screenshot -> {
+        videoRecorder.captureScreenshotOnly((screenshot, videoKey) -> {
             sendProgress("loot_drop", eventData, screenshot, null);
         });
     }
@@ -217,7 +224,7 @@ public class BingoProgressReporter
         eventData.add("rewards", rewardsArray);
 
         // Clue completions should always have proof
-        videoRecorder.captureScreenshotOnly(screenshot -> {
+        videoRecorder.captureScreenshotOnly((screenshot, videoKey) -> {
             sendProgress("clue_complete", eventData, screenshot, null);
         });
     }
@@ -241,7 +248,7 @@ public class BingoProgressReporter
         eventData.addProperty("deaths", deaths);
         eventData.addProperty("duration_ms", durationMs);
 
-        videoRecorder.captureScreenshotOnly(screenshot -> {
+        videoRecorder.captureScreenshotOnly((screenshot, videoKey) -> {
             sendProgress("raid_complete", eventData, screenshot, null);
         });
     }
@@ -265,7 +272,7 @@ public class BingoProgressReporter
         eventData.addProperty("deaths", deaths);
         eventData.addProperty("duration_ms", durationMs);
 
-        videoRecorder.captureScreenshotOnly(screenshot -> {
+        videoRecorder.captureScreenshotOnly((screenshot, videoKey) -> {
             sendProgress("gauntlet_complete", eventData, screenshot, null);
         });
     }
