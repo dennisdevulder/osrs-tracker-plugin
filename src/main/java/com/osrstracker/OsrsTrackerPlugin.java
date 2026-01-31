@@ -531,7 +531,8 @@ public class OsrsTrackerPlugin extends Plugin
         java.util.regex.Pattern.compile("You have completed the Tombs of Amascut");
 
     // Track recent raid completions to avoid duplicate reports (NPC death + chat message)
-    private long lastRaidCompletionTime = 0;
+    // Using AtomicLong for thread-safe access from game thread and event handlers
+    private final AtomicLong lastRaidCompletionTime = new AtomicLong(0);
     private static final long RAID_COMPLETION_COOLDOWN_MS = 5000; // 5 second cooldown
 
     /**
@@ -542,7 +543,7 @@ public class OsrsTrackerPlugin extends Plugin
     {
         // Check cooldown to avoid duplicate reports
         long now = System.currentTimeMillis();
-        if (now - lastRaidCompletionTime < RAID_COMPLETION_COOLDOWN_MS)
+        if (now - lastRaidCompletionTime.get() < RAID_COMPLETION_COOLDOWN_MS)
         {
             return;
         }
@@ -556,14 +557,14 @@ public class OsrsTrackerPlugin extends Plugin
             if (raidName != null)
             {
                 log.info("Raid completion detected via chat message: {}", raidName);
-                lastRaidCompletionTime = now;
+                lastRaidCompletionTime.set(now);
                 bingoProgressReporter.reportRaidComplete(raidName, true, 0, 0);
             }
         }
         else if (TOA_COMPLETE_PATTERN.matcher(message).find())
         {
             log.info("ToA completion detected via chat message");
-            lastRaidCompletionTime = now;
+            lastRaidCompletionTime.set(now);
             bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
         }
     }
@@ -699,7 +700,8 @@ public class OsrsTrackerPlugin extends Plugin
         {
             int itemId = item.getId();
             int quantity = item.getQuantity();
-            String itemName = itemManager.getItemComposition(itemId).getName();
+            net.runelite.api.ItemComposition composition = itemManager.getItemComposition(itemId);
+            String itemName = (composition != null) ? composition.getName() : "Unknown";
             long itemPrice = (long) itemManager.getItemPrice(itemId) * quantity;
 
             lootItems.add(new BingoProgressReporter.LootItem(itemId, itemName, quantity, itemPrice));
@@ -746,19 +748,19 @@ public class OsrsTrackerPlugin extends Plugin
             else if (isNpcIdInArray(npcId, GREAT_OLM_HEAD_IDS))
             {
                 log.info("Great Olm defeated - Chambers of Xeric complete!");
-                lastRaidCompletionTime = System.currentTimeMillis();
+                lastRaidCompletionTime.set(System.currentTimeMillis());
                 bingoProgressReporter.reportRaidComplete("Chambers of Xeric", true, 0, 0);
             }
             else if (isNpcIdInArray(npcId, VERZIK_VITUR_P3_IDS))
             {
                 log.info("Verzik Vitur defeated - Theatre of Blood complete!");
-                lastRaidCompletionTime = System.currentTimeMillis();
+                lastRaidCompletionTime.set(System.currentTimeMillis());
                 bingoProgressReporter.reportRaidComplete("Theatre of Blood", true, 0, 0);
             }
             else if (isNpcIdInArray(npcId, TUMEKENS_WARDEN_IDS) || isNpcIdInArray(npcId, ELIDINIS_WARDEN_IDS))
             {
                 log.info("Warden defeated - Tombs of Amascut complete!");
-                lastRaidCompletionTime = System.currentTimeMillis();
+                lastRaidCompletionTime.set(System.currentTimeMillis());
                 bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
             }
 

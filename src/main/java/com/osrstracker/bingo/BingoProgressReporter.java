@@ -36,7 +36,6 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.io.IOException;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Reports bingo progress events to the API.
