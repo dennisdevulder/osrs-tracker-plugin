@@ -60,7 +60,6 @@ public class ItemSnitchButton
 
     private Widget snitchButton;
 
-    @Getter
     private boolean filterActive = false;
 
     @Inject
