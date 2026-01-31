@@ -678,7 +678,7 @@ public class OsrsTrackerPlugin extends Plugin
             lootTracker.processLootDrop(npcName, event.getItems());
         }
 
-        // Report to bingo (checks subscriptions internally)
+        // Report to bingo (handles both loot_item and npc_kill_count tiles server-side)
         reportLootToBingo(npcId, npcName, event.getItems());
     }
 
