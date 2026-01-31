@@ -13,18 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Smart polling: fetches every 5 min if active event, skips if no event in next 6 hours
   - Sidebar panel now shows active bingo event status (name, tracking status, tile progress)
   - Reports boss kills, NPC kills, and clue completions to bingo progress API
-  - Captures proof screenshots at milestone intervals automatically
+  - Captures proof screenshots/videos at milestone intervals automatically
   - Silent progress updates (doesn't spam timeline, just updates bingo counts)
 - **Bingo Loot Item Tracking**
   - Loot drops now report to bingo system for `loot_item` tile tracking
   - Matches items by `item_id` (not name) for accurate tracking
   - Counts item quantities (e.g., looting 2 bones = +2 progress)
   - Independent of timeline loot tracking (no 100k minimum threshold)
+- **Raid Completion Detection**
+  - Detects Chambers of Xeric (CoX), Theatre of Blood (ToB), and Tombs of Amascut (ToA) completions
+  - Primary detection via final boss death (Great Olm, Verzik P3, Wardens)
+  - Fallback detection via completion chat message
+  - Includes deduplication to prevent double-reporting
+- **Gauntlet Completion Detection**
+  - Detects both Normal Gauntlet (Crystalline Hunllef) and Corrupted Gauntlet (Corrupted Hunllef)
+  - Distinguishes between normal and corrupted for separate bingo tile tracking
+- **Slayer Task Completion Detection**
+  - Parses slayer task completion messages to extract task name and kill count
+  - Reports to bingo system for slayer-related tiles
 
 ### Changed
 - Video capture timing adjusted from 8s pre + 2s post to 6s pre + 4s post
   - Same 10 second total, but more post-event footage to capture celebrations/interfaces
   - Death captures unchanged (still 5s post-event)
+- Reduced log verbosity: moved debugging log.info statements to log.debug
 
 ### Fixed
 - Screenshot Only mode not stopping frame capture

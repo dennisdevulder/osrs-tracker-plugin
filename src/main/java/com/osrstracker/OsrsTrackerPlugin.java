@@ -201,7 +201,7 @@ public class OsrsTrackerPlugin extends Plugin
         // Initialize trackers when already logged in (plugin enabled mid-session)
         if (client.getGameState() == GameState.LOGGED_IN)
         {
-            log.info("Plugin started while logged in - initializing trackers");
+            log.debug("Plugin started while logged in - initializing trackers");
             sessionActive = true;
             skillLevelTracker.initializeSkillLevels();
             questTracker.initializeQuestTracking();
@@ -463,7 +463,7 @@ public class OsrsTrackerPlugin extends Plugin
             // This ensures we capture fresh skill levels on the new world
             if (sessionActive)
             {
-                log.info("World hop detected - will re-initialize after hop");
+                log.debug("World hop detected - will re-initialize after hop");
                 sessionActive = false;
             }
         }

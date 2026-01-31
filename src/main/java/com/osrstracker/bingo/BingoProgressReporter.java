@@ -119,10 +119,10 @@ public class BingoProgressReporter
             return;
         }
 
-        log.info("Reporting NPC kill to bingo: {} ({})", npcName, npcId);
+        log.debug("Reporting NPC kill to bingo: {} ({})", npcName, npcId);
 
         boolean needsProof = subscriptionManager.needsProofForNpcKill(npcId);
-        log.info("needsProof={} for NPC kill {} ({})", needsProof, npcName, npcId);
+        log.debug("needsProof={} for NPC kill {} ({})", needsProof, npcName, npcId);
 
         JsonObject eventData = new JsonObject();
         eventData.addProperty("npc_id", npcId);
@@ -130,10 +130,10 @@ public class BingoProgressReporter
 
         if (needsProof)
         {
-            log.info("CAPTURING VIDEO PROOF for NPC kill milestone: {} ({})", npcName, npcId);
+            log.debug("Capturing video proof for NPC kill milestone: {} ({})", npcName, npcId);
             // Use captureEventVideo to get video based on user's quality settings
             videoRecorder.captureEventVideo((screenshot, videoKey) -> {
-                log.info("Proof captured (screenshot={}, video={}), sending progress",
+                log.debug("Proof captured (screenshot={}, video={}), sending progress",
                     screenshot != null ? "yes" : "no",
                     videoKey != null ? videoKey : "none");
                 sendProgress("npc_kill", eventData, screenshot, videoKey);

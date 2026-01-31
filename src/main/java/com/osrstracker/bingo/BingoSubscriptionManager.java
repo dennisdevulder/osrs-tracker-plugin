@@ -92,7 +92,7 @@ public class BingoSubscriptionManager
      */
     public void initialize()
     {
-        log.info("Initializing bingo subscription manager");
+        log.debug("Initializing bingo subscription manager");
         fetchSubscriptions();
     }
 
@@ -183,7 +183,7 @@ public class BingoSubscriptionManager
                         if (subscription.isHasActiveEvent())
                         {
                             BingoSubscription.BingoEventInfo event = subscription.getEvent();
-                            log.info("Bingo tracking active: {} (tracking {} bosses, {} NPCs, {} items)",
+                            log.debug("Bingo tracking active: {} (tracking {} bosses, {} NPCs, {} items)",
                                 event != null ? event.getName() : "Unknown",
                                 subscription.getSubscriptions().getBossIds().size(),
                                 subscription.getSubscriptions().getNpcIds().size(),
@@ -192,7 +192,7 @@ public class BingoSubscriptionManager
                             // Log tile progress with proof milestones
                             for (BingoSubscription.TileProgress tile : subscription.getTileProgress())
                             {
-                                log.info("  Tile {}: {} - count={}/{}, nextProofMilestone={}, proofInterval={}",
+                                log.debug("  Tile {}: {} - count={}/{}, nextProofMilestone={}, proofInterval={}",
                                     tile.getTileId(),
                                     tile.getDescription(),
                                     tile.getCurrentCount(),
@@ -203,7 +203,7 @@ public class BingoSubscriptionManager
                         }
                         else
                         {
-                            log.info("No active bingo event for user");
+                            log.debug("No active bingo event for user");
                         }
 
                         // Notify listeners if state changed
@@ -434,7 +434,7 @@ public class BingoSubscriptionManager
                     int currentCount = tile.getCurrentCount();
                     Integer nextMilestone = tile.getNextProofMilestone();
                     boolean needsProof = tile.needsProofAtCount(currentCount + 1);
-                    log.info("Tile {} ({}): currentCount={}, nextMilestone={}, checkCount={}, needsProof={}",
+                    log.debug("Tile {} ({}): currentCount={}, nextMilestone={}, checkCount={}, needsProof={}",
                         tile.getTileId(), tile.getDescription(), currentCount, nextMilestone, currentCount + 1, needsProof);
 
                     if (needsProof)
@@ -468,7 +468,7 @@ public class BingoSubscriptionManager
                 Integer oldMilestone = tile.getNextProofMilestone();
                 tile.setCurrentCount(newCount);
                 tile.setNextProofMilestone(nextProofMilestone);
-                log.info("Updated tile {} ({}): count {} -> {}, nextMilestone {} -> {}",
+                log.debug("Updated tile {} ({}): count {} -> {}, nextMilestone {} -> {}",
                     tileId, tile.getDescription(), oldCount, newCount, oldMilestone, nextProofMilestone);
                 break;
             }
