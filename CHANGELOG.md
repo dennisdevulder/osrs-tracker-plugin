@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Pet Drop Detection**
+  - Detects all three pet drop message types:
+    - "You have a funny feeling like you're being followed." (new pet becomes follower)
+    - "You feel something weird sneaking into your backpack." (pet goes to inventory)
+    - "You have a funny feeling like you would have been followed..." (duplicate pet)
+  - Extended 20-second video capture to celebrate the moment
+  - Identifies pet by NPC ID with 60+ pets mapped (boss pets, skilling pets, raid pets, etc.)
+  - Falls back to follower NPC name if pet not in database
+  - Configurable via "Track Pet Drops" setting (enabled by default)
 - **Bingo Event Tracking System**
   - Automatically fetches subscription data from API on login
   - Smart polling: fetches every 5 min if active event, skips if no event in next 6 hours

@@ -55,6 +55,7 @@ import com.osrstracker.itemsnitch.ItemSnitchBankOverlay;
 import com.osrstracker.itemsnitch.ItemSnitchButton;
 import com.osrstracker.bingo.BingoSubscriptionManager;
 import com.osrstracker.bingo.BingoProgressReporter;
+import com.osrstracker.pets.PetTracker;
 import com.osrstracker.video.VideoRecorder;
 import net.runelite.client.ui.overlay.OverlayManager;
 
@@ -154,6 +155,9 @@ public class OsrsTrackerPlugin extends Plugin
 
     @Inject
     private BingoProgressReporter bingoProgressReporter;
+
+    @Inject
+    private PetTracker petTracker;
 
     @Inject
     private OverlayManager overlayManager;
@@ -489,7 +493,7 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle chat messages - delegate to collection log and clue scroll trackers.
+     * Handle chat messages - delegate to collection log, clue scroll, and pet trackers.
      */
     @Subscribe
     public void onChatMessage(ChatMessage chatMessage)
@@ -511,6 +515,12 @@ public class OsrsTrackerPlugin extends Plugin
         if (config.trackClueScrolls())
         {
             clueScrollTracker.processGameMessage(message);
+        }
+
+        // Check for pet drops (gets 20-second extended video capture!)
+        if (config.trackPets())
+        {
+            petTracker.processGameMessage(message);
         }
 
         // Check for slayer task completion
