@@ -82,13 +82,16 @@ public class ItemSnitchTracker
     // Reverse lookup: variant item ID -> SharedItem (for matching degraded items to their parent)
     private final Map<Integer, SharedItem> variantToSharedItemMap = new ConcurrentHashMap<>();
 
-    // Items found in current bank session
-    private final Map<Integer, BankItemSighting> currentBankSharedItems = new ConcurrentHashMap<>();
+    // Items found in current bank session (keyed by "location:itemId" for uniqueness across locations)
+    private final Map<String, BankItemSighting> currentSharedItems = new ConcurrentHashMap<>();
 
     // Track if bank is currently open
     private volatile boolean bankOpen = false;
 
-    // Track if we've already sent a report this login session
+    // Track if shared chest is currently open
+    private volatile boolean sharedChestOpen = false;
+
+    // Track if we've already sent a report this bank session
     private volatile boolean reportSentThisSession = false;
 
     // Track initialization state
@@ -151,8 +154,9 @@ public class ItemSnitchTracker
         sharedItemIds.clear();
         sharedItemsMap.clear();
         variantToSharedItemMap.clear();
-        currentBankSharedItems.clear();
+        currentSharedItems.clear();
         bankOpen = false;
+        sharedChestOpen = false;
         reportSentThisSession = false;
         initialized = false;
     }
@@ -169,11 +173,11 @@ public class ItemSnitchTracker
 
         bankOpen = true;
         reportSentThisSession = false;
-        currentBankSharedItems.clear();
+        currentSharedItems.clear();
         log.debug("Bank opened, scanning for shared items");
 
-        // Scan bank on next game tick to ensure items are loaded
-        clientThread.invokeLater(this::scanBankForSharedItems);
+        // Scan bank, equipment, and inventory on next game tick to ensure items are loaded
+        clientThread.invokeLater(this::scanAllContainersForSharedItems);
     }
 
     /**
@@ -187,16 +191,17 @@ public class ItemSnitchTracker
         }
 
         bankOpen = false;
-        log.debug("Bank closed, found {} shared items", currentBankSharedItems.size());
+        log.debug("Bank closed, found {} shared items across all locations", currentSharedItems.size());
 
-        // Show warning if shared items were found (skip if already visible in recent chat)
-        if (!currentBankSharedItems.isEmpty() && config.itemSnitchWarnings() && !isItemSnitchMessageInRecentChat())
+        // Show warning if shared items were found in personal locations (skip if already visible in recent chat)
+        Map<String, BankItemSighting> personalItems = getPersonalSharedItems();
+        if (!personalItems.isEmpty() && config.itemSnitchWarnings() && !isItemSnitchMessageInRecentChat())
         {
             showSharedItemsWarning();
         }
 
         // Report sightings to API if we haven't already
-        if (!currentBankSharedItems.isEmpty() && !reportSentThisSession && config.itemSnitchReportSightings())
+        if (!currentSharedItems.isEmpty() && !reportSentThisSession && config.itemSnitchReportSightings())
         {
             reportItemSightingsToApi();
         }
@@ -212,14 +217,79 @@ public class ItemSnitchTracker
             return;
         }
 
-        scanBankForSharedItems();
+        scanAllContainersForSharedItems();
     }
 
     /**
-     * Scan the bank container for shared items.
-     * Checks against all variant IDs (degraded Barrows, charged weapons, etc.)
+     * Called when the shared chest widget is loaded (GIM storage opened).
      */
-    private void scanBankForSharedItems()
+    public void onSharedChestOpen()
+    {
+        if (!config.trackItemSnitch() || !initialized)
+        {
+            return;
+        }
+
+        sharedChestOpen = true;
+        reportSentThisSession = false;
+        currentSharedItems.clear();
+        log.debug("Shared chest opened, scanning for shared items");
+
+        // Scan all containers on next game tick to ensure items are loaded
+        clientThread.invokeLater(this::scanAllContainersForSharedChest);
+    }
+
+    /**
+     * Called when the shared chest widget is closed.
+     */
+    public void onSharedChestClose()
+    {
+        if (!config.trackItemSnitch() || !sharedChestOpen)
+        {
+            return;
+        }
+
+        sharedChestOpen = false;
+        log.debug("Shared chest closed");
+
+        // Report sightings to API
+        if (!currentSharedItems.isEmpty() && config.itemSnitchReportSightings())
+        {
+            reportItemSightingsToApi();
+        }
+    }
+
+    /**
+     * Called when shared chest items change (ItemContainerChanged event for GROUP_STORAGE).
+     * Also rescans inventory since items may have moved between containers.
+     */
+    public void onSharedChestItemsChanged()
+    {
+        if (!config.trackItemSnitch() || !sharedChestOpen || !initialized)
+        {
+            return;
+        }
+
+        // Clear all tracked items and rescan everything - items may have moved between containers
+        currentSharedItems.clear();
+
+        // Scan shared chest
+        scanContainerForSharedItems(InventoryID.GROUP_STORAGE, BankItemSighting.LOCATION_SHARED_CHEST);
+
+        // Scan inventory (player may have moved items to/from chest)
+        scanContainerForSharedItems(InventoryID.INVENTORY, BankItemSighting.LOCATION_INVENTORY);
+
+        // Scan equipment
+        scanContainerForSharedItems(InventoryID.EQUIPMENT, BankItemSighting.LOCATION_EQUIPMENT);
+
+        log.debug("Shared chest interaction scan complete: found {} total shared items", currentSharedItems.size());
+    }
+
+    /**
+     * Scan all containers (bank, equipment, inventory) for shared items.
+     * Used when bank is open.
+     */
+    private void scanAllContainersForSharedItems()
     {
         if (sharedItemIds.isEmpty())
         {
@@ -227,16 +297,63 @@ public class ItemSnitchTracker
             return;
         }
 
-        ItemContainer bankContainer = client.getItemContainer(InventoryID.BANK);
-        if (bankContainer == null)
+        currentSharedItems.clear();
+
+        // Scan bank
+        scanContainerForSharedItems(InventoryID.BANK, BankItemSighting.LOCATION_BANK);
+
+        // Scan equipment
+        scanContainerForSharedItems(InventoryID.EQUIPMENT, BankItemSighting.LOCATION_EQUIPMENT);
+
+        // Scan inventory
+        scanContainerForSharedItems(InventoryID.INVENTORY, BankItemSighting.LOCATION_INVENTORY);
+
+        log.debug("Bank scan complete: found {} shared items across all locations", currentSharedItems.size());
+    }
+
+    /**
+     * Scan all containers including shared chest.
+     * Used when shared chest is open.
+     */
+    private void scanAllContainersForSharedChest()
+    {
+        if (sharedItemIds.isEmpty())
         {
-            log.debug("Bank container not available");
+            log.debug("No shared items configured to track");
             return;
         }
 
-        currentBankSharedItems.clear();
+        currentSharedItems.clear();
 
-        for (Item item : bankContainer.getItems())
+        // Scan shared chest
+        scanContainerForSharedItems(InventoryID.GROUP_STORAGE, BankItemSighting.LOCATION_SHARED_CHEST);
+
+        // Scan equipment
+        scanContainerForSharedItems(InventoryID.EQUIPMENT, BankItemSighting.LOCATION_EQUIPMENT);
+
+        // Scan inventory
+        scanContainerForSharedItems(InventoryID.INVENTORY, BankItemSighting.LOCATION_INVENTORY);
+
+        log.debug("Shared chest scan complete: found {} shared items across all locations", currentSharedItems.size());
+    }
+
+    /**
+     * Scan a specific container for shared items.
+     *
+     * @param containerId The InventoryID of the container to scan
+     * @param location The location string to use for sightings
+     */
+    private void scanContainerForSharedItems(InventoryID containerId, String location)
+    {
+        ItemContainer container = client.getItemContainer(containerId);
+        if (container == null)
+        {
+            log.debug("{} container not available", location);
+            return;
+        }
+
+        int foundCount = 0;
+        for (Item item : container.getItems())
         {
             if (item.getId() == -1)
             {
@@ -252,31 +369,60 @@ public class ItemSnitchTracker
                 ItemComposition itemComp = itemManager.getItemComposition(item.getId());
                 String itemName = itemComp != null ? itemComp.getName() : "Unknown";
 
-                // Use the shared item's display name for consistency in reports
-                String displayName = (sharedItem != null) ? sharedItem.getItemName() : itemName;
-
                 BankItemSighting sighting = new BankItemSighting(
                     item.getId(),
-                    itemName,  // Actual item name (may show degradation state)
-                    item.getQuantity()
+                    itemName,
+                    item.getQuantity(),
+                    location
                 );
 
-                // Store with a note about which shared item this matches
-                if (sharedItem != null && item.getId() != sharedItem.getItemId())
-                {
-                    log.debug("Found variant {} of shared item: {} (primary: {})",
-                        item.getId(), itemName, sharedItem.getItemName());
-                }
-                else
-                {
-                    log.debug("Found shared item: {} x{}", itemName, item.getQuantity());
-                }
+                // Use composite key to allow same item in multiple locations
+                String key = location + ":" + item.getId();
+                currentSharedItems.put(key, sighting);
+                foundCount++;
 
-                currentBankSharedItems.put(item.getId(), sighting);
+                log.debug("Found shared item in {}: {} x{}", location, itemName, item.getQuantity());
             }
         }
 
-        log.debug("Bank scan complete: found {} shared items", currentBankSharedItems.size());
+        if (foundCount > 0)
+        {
+            log.debug("Found {} shared items in {}", foundCount, location);
+        }
+    }
+
+    /**
+     * Get shared items that are in personal locations (bank, equipment, inventory).
+     * These are items that should potentially be returned to shared storage.
+     */
+    private Map<String, BankItemSighting> getPersonalSharedItems()
+    {
+        Map<String, BankItemSighting> personalItems = new HashMap<>();
+        for (Map.Entry<String, BankItemSighting> entry : currentSharedItems.entrySet())
+        {
+            String location = entry.getValue().getLocation();
+            if (!BankItemSighting.LOCATION_SHARED_CHEST.equals(location))
+            {
+                personalItems.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return personalItems;
+    }
+
+    /**
+     * Get shared items that are in the bank only (for highlighting/filtering).
+     */
+    public Map<Integer, BankItemSighting> getCurrentBankSharedItems()
+    {
+        Map<Integer, BankItemSighting> bankItems = new HashMap<>();
+        for (BankItemSighting sighting : currentSharedItems.values())
+        {
+            if (BankItemSighting.LOCATION_BANK.equals(sighting.getLocation()))
+            {
+                bankItems.put(sighting.getItemId(), sighting);
+            }
+        }
+        return Collections.unmodifiableMap(bankItems);
     }
 
     /**
@@ -317,17 +463,18 @@ public class ItemSnitchTracker
     }
 
     /**
-     * Show a chat warning about shared items in the bank.
+     * Show a chat warning about shared items in personal locations (not in shared chest).
      * Uses verbosity setting to determine message detail level.
      */
     private void showSharedItemsWarning()
     {
-        if (currentBankSharedItems.isEmpty())
+        Map<String, BankItemSighting> personalItems = getPersonalSharedItems();
+        if (personalItems.isEmpty())
         {
             return;
         }
 
-        int itemCount = currentBankSharedItems.size();
+        int itemCount = personalItems.size();
         String coloredMessage;
 
         if (config.itemSnitchVerbosity() == ItemSnitchVerbosity.MINIMAL)
@@ -335,27 +482,35 @@ public class ItemSnitchTracker
             // Minimal: just show the count
             coloredMessage = "<col=aa00ff>[Item Snitch] " +
                 "You have " + itemCount + " shared item" + (itemCount != 1 ? "s" : "") +
-                " in your bank.</col>";
+                " on your account.</col>";
         }
         else
         {
-            // Verbose: show the full list
-            List<String> itemNames = new ArrayList<>();
-            for (BankItemSighting sighting : currentBankSharedItems.values())
+            // Verbose: show the full list with locations
+            List<String> itemDescriptions = new ArrayList<>();
+            for (BankItemSighting sighting : personalItems.values())
             {
+                String desc = sighting.getName();
                 if (sighting.getQuantity() > 1)
                 {
-                    itemNames.add(sighting.getQuantity() + "x " + sighting.getName());
+                    desc = sighting.getQuantity() + "x " + desc;
                 }
-                else
+                // Add location indicator
+                String loc = sighting.getLocation();
+                if (BankItemSighting.LOCATION_EQUIPMENT.equals(loc))
                 {
-                    itemNames.add(sighting.getName());
+                    desc += " (equipped)";
                 }
+                else if (BankItemSighting.LOCATION_INVENTORY.equals(loc))
+                {
+                    desc += " (inventory)";
+                }
+                itemDescriptions.add(desc);
             }
 
-            String itemList = String.join(", ", itemNames);
+            String itemList = String.join(", ", itemDescriptions);
             coloredMessage = "<col=aa00ff>[Item Snitch] " +
-                "You have the following shared items in your bank: " + itemList + "</col>";
+                "You have shared items: " + itemList + "</col>";
         }
 
         chatMessageManager.queue(QueuedMessage.builder()
@@ -363,7 +518,7 @@ public class ItemSnitchTracker
             .runeLiteFormattedMessage(coloredMessage)
             .build());
 
-        log.debug("Warned player about {} shared items in bank", currentBankSharedItems.size());
+        log.debug("Warned player about {} shared items in personal locations", personalItems.size());
     }
 
     /**
@@ -379,12 +534,12 @@ public class ItemSnitchTracker
     }
 
     /**
-     * Update last_seen stats on the API for shared items found in bank.
-     * This only updates last_seen_by and last_seen_at - no events are created.
+     * Report item sightings to the API with location information.
+     * This updates last_seen_by, last_seen_at, and location for each item.
      */
     private void reportItemSightingsToApi()
     {
-        if (currentBankSharedItems.isEmpty() || reportSentThisSession)
+        if (currentSharedItems.isEmpty() || reportSentThisSession)
         {
             return;
         }
@@ -392,7 +547,7 @@ public class ItemSnitchTracker
         Player localPlayer = client.getLocalPlayer();
         if (localPlayer == null || localPlayer.getName() == null)
         {
-            log.warn("Cannot update last_seen: player name not available");
+            log.warn("Cannot report item sightings: player name not available");
             return;
         }
 
@@ -403,25 +558,26 @@ public class ItemSnitchTracker
         payload.addProperty("player_name", playerName);
 
         JsonArray itemsArray = new JsonArray();
-        for (BankItemSighting sighting : currentBankSharedItems.values())
+        for (BankItemSighting sighting : currentSharedItems.values())
         {
             JsonObject itemJson = new JsonObject();
             itemJson.addProperty("item_id", sighting.getItemId());
             itemJson.addProperty("name", sighting.getName());
             itemJson.addProperty("quantity", sighting.getQuantity());
+            itemJson.addProperty("location", sighting.getLocation());
             itemsArray.add(itemJson);
         }
         payload.add("items", itemsArray);
 
-        // Send to API - this only updates last_seen fields, no events created
+        // Send to API
         apiClient.sendEventToApi(
             "/api/webhooks/item_sighting",
             payload.toString(),
-            "last seen update"
+            "item sighting report"
         );
 
         reportSentThisSession = true;
-        log.debug("Updated last_seen for {} shared items", currentBankSharedItems.size());
+        log.debug("Reported {} item sightings to API", currentSharedItems.size());
     }
 
     /**
@@ -574,7 +730,7 @@ public class ItemSnitchTracker
             {
                 log.debug("Bank already open, triggering scan after initialization");
                 clientThread.invokeLater(() -> {
-                    scanBankForSharedItems();
+                    scanAllContainersForSharedItems();
                     // Notify any listeners that initialization is complete
                     onInitializationComplete();
                 });
@@ -622,19 +778,19 @@ public class ItemSnitchTracker
     }
 
     /**
-     * Get items currently found in the bank that are shared items.
-     */
-    public Map<Integer, BankItemSighting> getCurrentBankSharedItems()
-    {
-        return Collections.unmodifiableMap(currentBankSharedItems);
-    }
-
-    /**
      * Check if the bank is currently open.
      */
     public boolean isBankOpen()
     {
         return bankOpen;
+    }
+
+    /**
+     * Check if the shared chest is currently open.
+     */
+    public boolean isSharedChestOpen()
+    {
+        return sharedChestOpen;
     }
 
     /**

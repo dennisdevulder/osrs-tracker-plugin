@@ -225,6 +225,18 @@ public interface OsrsTrackerConfig extends Config
         return true;
     }
 
+    @ConfigItem(
+        keyName = "trackPets",
+        name = "Track Pet Drops",
+        description = "Automatically send pet drop events to your tracker with extended 20-second video capture",
+        section = trackingSection,
+        position = 5
+    )
+    default boolean trackPets()
+    {
+        return true;
+    }
+
     // ===== Loot Settings =====
 
     @ConfigItem(
@@ -350,6 +362,6 @@ public interface OsrsTrackerConfig extends Config
     )
     default VideoQuality videoQuality()
     {
-        return VideoQuality.getDefaultForCurrentHeap();
+        return VideoQuality.getDefault();
     }
 }

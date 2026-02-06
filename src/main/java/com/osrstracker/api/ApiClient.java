@@ -28,6 +28,9 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.ChatMessageType;
+import net.runelite.client.chat.ChatMessageManager;
+import net.runelite.client.chat.QueuedMessage;
 import okhttp3.*;
 
 import javax.inject.Inject;
@@ -47,13 +50,19 @@ public class ApiClient
     private final OkHttpClient httpClient;
     private final OsrsTrackerConfig config;
     private final Gson gson;
+    private final ChatMessageManager chatMessageManager;
 
     @Inject
-    public ApiClient(OkHttpClient httpClient, OsrsTrackerConfig config, Gson gson)
+    public ApiClient(OkHttpClient httpClient, OsrsTrackerConfig config, Gson gson, ChatMessageManager chatMessageManager)
     {
-        this.httpClient = httpClient;
+        // Create our own client without disk cache to avoid RuneLite cache conflicts
+        // The shared RuneLite client uses disk caching which can fail on Windows
+        this.httpClient = httpClient.newBuilder()
+            .cache(null)  // Disable disk cache for our API calls
+            .build();
         this.config = config;
         this.gson = gson;
+        this.chatMessageManager = chatMessageManager;
     }
 
     /**
@@ -144,6 +153,12 @@ public class ApiClient
                     {
                         log.debug("Successfully sent {} to OSRS Tracker", eventDescription);
                     }
+                    else if (response.code() == 402)
+                    {
+                        // Payment Required - daily video limit reached
+                        log.warn("Daily video limit reached for {}", eventDescription);
+                        showChatMessage("OSRS Tracker: Daily video limit reached! Upgrade at osrs-tracker.com/upgrade for unlimited videos.");
+                    }
                     else
                     {
                         log.warn("Failed to send {}: {} - {}", eventDescription, response.code(), response.message());
@@ -172,5 +187,20 @@ public class ApiClient
         }
 
         return true;
+    }
+
+    /**
+     * Shows a chat message in the game client.
+     * Used to notify users of important events like quota limits.
+     */
+    private void showChatMessage(String message)
+    {
+        if (chatMessageManager != null)
+        {
+            chatMessageManager.queue(QueuedMessage.builder()
+                .type(ChatMessageType.GAMEMESSAGE)
+                .runeLiteFormattedMessage("<col=ff9040>" + message + "</col>")
+                .build());
+        }
     }
 }

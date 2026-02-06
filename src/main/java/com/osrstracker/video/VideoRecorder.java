@@ -26,10 +26,13 @@ package com.osrstracker.video;
 
 import lombok.extern.slf4j.Slf4j;
 import com.osrstracker.OsrsTrackerConfig;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.client.chat.ChatMessageManager;
+import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.util.ImageUtil;
 
@@ -43,12 +46,14 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.nio.ByteBuffer;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import okhttp3.*;
+import okio.BufferedSink;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
@@ -75,19 +80,21 @@ public class VideoRecorder
     private final DrawManager drawManager;
     private final OsrsTrackerConfig config;
     private final Client client;
+    private final ChatMessageManager chatMessageManager;
     private final ScheduledExecutorService scheduler;
     private final ExecutorService asyncWriter;
+    private final ExecutorService apiExecutor; // Dedicated thread for API calls (presigned URLs)
     private final OkHttpClient httpClient;
     private final OkHttpClient uploadClient; // Separate client with longer timeouts for uploads
     private final Gson gson;
 
     // Circular buffer configuration
     private static final int MAX_FRAMES = 300; // 10 seconds at 30 FPS
-    private static final int CLIP_FRAMES = 300; // Frames to capture for a clip
 
     // Circular buffer storage
     private final byte[][] jpegBuffer = new byte[MAX_FRAMES][];
     private final long[] timestampBuffer = new long[MAX_FRAMES];
+    private final boolean[] needsBlurBuffer = new boolean[MAX_FRAMES]; // Tracks if frame needs blur (deferred to upload)
     private final AtomicInteger writeIndex = new AtomicInteger(0);
     private final AtomicInteger frameCount = new AtomicInteger(0);
     private final Object bufferLock = new Object();
@@ -95,35 +102,51 @@ public class VideoRecorder
     // Recording state
     private final AtomicBoolean isRecording = new AtomicBoolean(false);
     private final AtomicBoolean isCapturingPostEvent = new AtomicBoolean(false);
-    private final AtomicLong lastFrameTime = new AtomicLong(0);
 
     // Backpressure: limit concurrent encoding operations
     private final AtomicInteger pendingEncodes = new AtomicInteger(0);
     private static final int MAX_PENDING_ENCODES = 4;
 
-    // Sensitive content detection - track state for async frame processing
+    // Sensitive content detection - cached to avoid expensive widget lookups every frame
     private final AtomicBoolean sensitiveContentVisible = new AtomicBoolean(false);
+    private final AtomicLong lastSensitiveCheck = new AtomicLong(0);
+    private static final long SENSITIVE_CHECK_INTERVAL_MS = 500; // Check every 500ms instead of every frame
 
-    private ScheduledFuture<?> captureTask;
+    private AsyncFrameCapture asyncFrameCapture;
 
     // Track current capture settings to detect quality changes
     private volatile int currentCaptureFps = 0;
     private volatile float currentJpegQuality = 0.5f;
 
+    // Set when GPU plugin is detected as unavailable - prevents retry loop in updateCaptureRateIfNeeded.
+    // Reset when the plugin restarts (startUp calls startRecording which resets this).
+    private volatile boolean gpuUnavailable = false;
+    private volatile boolean gpuWarningShown = false;
+
     // Blur kernel for sensitive content protection (15x15 box blur for heavy blur)
     private static final int BLUR_RADIUS = 15;
 
     @Inject
-    public VideoRecorder(DrawManager drawManager, OsrsTrackerConfig config, Client client, OkHttpClient httpClient, Gson gson)
+    public VideoRecorder(DrawManager drawManager, OsrsTrackerConfig config, Client client, ChatMessageManager chatMessageManager, OkHttpClient httpClient, Gson gson)
     {
         this.drawManager = drawManager;
         this.config = config;
         this.client = client;
-        this.httpClient = httpClient;
+        this.chatMessageManager = chatMessageManager;
         this.gson = gson;
+
+        // Create our own client without disk cache to avoid RuneLite cache conflicts
+        // The shared RuneLite client uses disk caching which can fail on Windows due to
+        // file locking issues, causing presigned URL requests to fail
+        // Connection pooling reduces latency for repeated API calls (presigned URLs)
+        this.httpClient = httpClient.newBuilder()
+            .cache(null)  // Disable disk cache for our API calls
+            .connectionPool(new ConnectionPool(5, 5, TimeUnit.MINUTES))  // Keep up to 5 connections alive for 5 min
+            .build();
 
         // Create a separate client with longer timeouts for large video uploads
         this.uploadClient = httpClient.newBuilder()
+            .cache(null)  // Disable disk cache
             .connectTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(5, TimeUnit.MINUTES)  // 5 min for large uploads
             .readTimeout(5, TimeUnit.MINUTES)
@@ -141,8 +164,72 @@ public class VideoRecorder
             return t;
         });
 
-        log.info("Video recorder initialized - using in-memory circular buffer ({} frames max, ~{}MB)",
-            MAX_FRAMES, MAX_FRAMES * 30 / 1024);
+        // Dedicated single thread for API calls (presigned URLs)
+        // This prevents blocking the asyncWriter threads during HTTP calls
+        this.apiExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "OSRS-Tracker-API");
+            t.setDaemon(true);
+            return t;
+        });
+
+        log.debug("Video recorder initialized ({} frames max)", MAX_FRAMES);
+    }
+
+    // ---- Package-private API for AsyncFrameCapture ----
+
+    /**
+     * @return true if recording is currently active
+     */
+    boolean isCurrentlyRecording()
+    {
+        return isRecording.get();
+    }
+
+    /**
+     * @return the current capture FPS setting, or 0 if not recording
+     */
+    int getCaptureFps()
+    {
+        return currentCaptureFps;
+    }
+
+    /**
+     * @return true if the encoding pipeline can accept another frame (backpressure check)
+     */
+    boolean canAcceptFrame()
+    {
+        return pendingEncodes.get() < MAX_PENDING_ENCODES;
+    }
+
+    /**
+     * Submits a raw RGBA frame from PBO readback for async encoding and storage.
+     * Handles blur detection, RGBA-to-RGB conversion, JPEG encoding, and circular buffer storage.
+     * This method returns immediately; encoding happens on a background thread.
+     *
+     * @param rgbaPixels Raw RGBA pixel data from PBO (bottom-up, OpenGL convention)
+     * @param width The width of the image in pixels
+     * @param height The height of the image in pixels
+     */
+    void submitCapturedFrame(ByteBuffer rgbaPixels, int width, int height)
+    {
+        long currentTimeMs = System.currentTimeMillis();
+        boolean shouldBlur = getCachedSensitiveContentVisible(currentTimeMs);
+
+        pendingEncodes.incrementAndGet();
+        asyncWriter.submit(() -> {
+            try
+            {
+                encodeAndStoreFrame(rgbaPixels, width, height, currentTimeMs, shouldBlur);
+            }
+            catch (Exception e)
+            {
+                log.error("Failed to encode PBO frame", e);
+            }
+            finally
+            {
+                pendingEncodes.decrementAndGet();
+            }
+        });
     }
 
     /**
@@ -190,6 +277,33 @@ public class VideoRecorder
         }
 
         return false;
+    }
+
+    /**
+     * Gets the cached sensitive content visibility status.
+     * Only performs the expensive widget lookup every SENSITIVE_CHECK_INTERVAL_MS milliseconds.
+     * This reduces overhead from 30 widget lookups/second to ~2/second.
+     *
+     * @param currentTime The current timestamp
+     * @return true if sensitive content is visible (cached result)
+     */
+    private boolean getCachedSensitiveContentVisible(long currentTime)
+    {
+        long lastCheck = lastSensitiveCheck.get();
+
+        // If enough time has passed, update the cached value
+        if (currentTime - lastCheck >= SENSITIVE_CHECK_INTERVAL_MS)
+        {
+            if (lastSensitiveCheck.compareAndSet(lastCheck, currentTime))
+            {
+                boolean isVisible = isSensitiveContentVisible();
+                sensitiveContentVisible.set(isVisible);
+                return isVisible;
+            }
+        }
+
+        // Return cached value
+        return sensitiveContentVisible.get();
     }
 
     /**
@@ -304,7 +418,6 @@ public class VideoRecorder
     {
         if (isRecording.getAndSet(true))
         {
-            log.debug("Recording already active");
             return;
         }
 
@@ -320,21 +433,19 @@ public class VideoRecorder
             frameCount.set(0);
         }
 
-        log.info("Video recording started with in-memory circular buffer");
+        gpuUnavailable = false;
+        gpuWarningShown = false;
 
         // Capture at the quality setting's FPS and JPEG quality
         VideoQuality quality = config.videoQuality();
         currentCaptureFps = quality.getFps() > 0 ? quality.getFps() : 30;
         currentJpegQuality = quality.getJpegQuality() > 0 ? quality.getJpegQuality() : 0.5f;
-        long frameIntervalMs = 1000L / currentCaptureFps;
-        log.info("Video capture started at {} FPS, {}% JPEG quality", currentCaptureFps, (int)(currentJpegQuality * 100));
+        log.debug("Video capture started at {} FPS, {}% JPEG quality", currentCaptureFps, (int)(currentJpegQuality * 100));
 
-        captureTask = scheduler.scheduleAtFixedRate(
-            this::captureFrame,
-            0,
-            frameIntervalMs,
-            TimeUnit.MILLISECONDS
-        );
+        // Use async PBO capture via everyFrameListener for near-zero client thread stall.
+        // If GPU plugin is not active, onGpuUnavailable stops recording and falls back to screenshot-only.
+        asyncFrameCapture = new AsyncFrameCapture(drawManager, this, this::onGpuUnavailable);
+        asyncFrameCapture.start();
     }
 
     /**
@@ -347,11 +458,10 @@ public class VideoRecorder
             return;
         }
 
-        log.info("Stopping video recording");
-
-        if (captureTask != null)
+        if (asyncFrameCapture != null)
         {
-            captureTask.cancel(false);
+            asyncFrameCapture.stop();
+            asyncFrameCapture = null;
         }
 
         // Clear the buffer to free memory
@@ -361,13 +471,36 @@ public class VideoRecorder
             {
                 jpegBuffer[i] = null;
                 timestampBuffer[i] = 0;
+                needsBlurBuffer[i] = false;
             }
             writeIndex.set(0);
             frameCount.set(0);
         }
 
         currentCaptureFps = 0;
-        log.debug("Cleared in-memory frame buffer");
+    }
+
+    /**
+     * Called by AsyncFrameCapture when no GL context is available (GPU plugin disabled).
+     * Stops video recording entirely - GPU plugin is required for video capture.
+     * Events will fall back to screenshot-only mode automatically since isRecording is false.
+     * Chat notification is deferred to captureEventVideo since this fires before login.
+     */
+    private void onGpuUnavailable()
+    {
+        log.debug("GPU plugin not active, falling back to screenshot-only");
+
+        // Clean up the async frame capture
+        if (asyncFrameCapture != null)
+        {
+            asyncFrameCapture.stop();
+            asyncFrameCapture = null;
+        }
+
+        // Stop recording - captureEventVideo will fall back to screenshot-only since isRecording is false
+        isRecording.set(false);
+        currentCaptureFps = 0;
+        gpuUnavailable = true;
     }
 
     /**
@@ -376,53 +509,102 @@ public class VideoRecorder
      */
     public void updateCaptureRateIfNeeded()
     {
-        if (!isRecording.get() || isCapturingPostEvent.get())
+        if (isCapturingPostEvent.get())
         {
             return;
         }
 
         VideoQuality quality = config.videoQuality();
-        int targetFps = quality.getFps() > 0 ? quality.getFps() : 30;
-        float targetJpegQuality = quality.getJpegQuality() > 0 ? quality.getJpegQuality() : 0.5f;
+
+        // Handle Screenshot Only mode - stop all frame capture
+        if (quality == VideoQuality.SCREENSHOT_ONLY)
+        {
+            if (currentCaptureFps != 0)
+            {
+                log.debug("Switching to Screenshot Only mode");
+
+                // Stop async PBO capture
+                if (asyncFrameCapture != null)
+                {
+                    asyncFrameCapture.stop();
+                    asyncFrameCapture = null;
+                }
+
+                // Clear the buffer to free memory
+                synchronized (bufferLock)
+                {
+                    for (int i = 0; i < MAX_FRAMES; i++)
+                    {
+                        jpegBuffer[i] = null;
+                        timestampBuffer[i] = 0;
+                        needsBlurBuffer[i] = false;
+                    }
+                    writeIndex.set(0);
+                    frameCount.set(0);
+                }
+
+                currentCaptureFps = 0;
+                currentJpegQuality = 0;
+            }
+            return;
+        }
+
+        // Video mode - but GPU plugin is required for recording
+        if (gpuUnavailable)
+        {
+            return;
+        }
+
+        int targetFps = quality.getFps();
+        float targetJpegQuality = quality.getJpegQuality();
 
         // Update JPEG quality if changed (takes effect on next frame)
         if (targetJpegQuality != currentJpegQuality)
         {
-            log.debug("Quality setting changed, updating JPEG quality from {}% to {}%",
-                (int)(currentJpegQuality * 100), (int)(targetJpegQuality * 100));
             currentJpegQuality = targetJpegQuality;
         }
 
-        // Update FPS if changed (requires restarting capture task)
+        // Update FPS if changed (AsyncFrameCapture reads currentCaptureFps directly each frame)
         if (targetFps != currentCaptureFps)
         {
-            log.debug("Quality setting changed, updating capture rate from {} to {} FPS", currentCaptureFps, targetFps);
+            log.debug("Capture rate changed from {} to {} FPS", currentCaptureFps, targetFps);
 
-            // Cancel current capture task
-            if (captureTask != null)
+            // Clear buffer when switching quality to avoid mixing frame rates
+            synchronized (bufferLock)
             {
-                captureTask.cancel(false);
+                for (int i = 0; i < MAX_FRAMES; i++)
+                {
+                    jpegBuffer[i] = null;
+                    timestampBuffer[i] = 0;
+                    needsBlurBuffer[i] = false;
+                }
+                writeIndex.set(0);
+                frameCount.set(0);
             }
 
-            // Start new capture task at new rate
+            // Update FPS - AsyncFrameCapture reads this volatile field directly
             currentCaptureFps = targetFps;
-            long frameIntervalMs = 1000L / currentCaptureFps;
 
-            captureTask = scheduler.scheduleAtFixedRate(
-                this::captureFrame,
-                0,
-                frameIntervalMs,
-                TimeUnit.MILLISECONDS
-            );
+            // Start async capture if not already running (switching from Screenshot Only)
+            if (asyncFrameCapture == null)
+            {
+                asyncFrameCapture = new AsyncFrameCapture(drawManager, this, this::onGpuUnavailable);
+                asyncFrameCapture.start();
+            }
+
+            // Mark as recording if we weren't before
+            isRecording.set(true);
         }
     }
 
     // Default post-event duration in milliseconds
-    private static final int DEFAULT_POST_EVENT_MS = 2000;
+    // 4 seconds post-event gives time for interfaces/celebrations to appear
+    // (6 seconds pre-event + 4 seconds post-event = 10 seconds total)
+    private static final int DEFAULT_POST_EVENT_MS = 4000;
 
     /**
      * Triggers a video/screenshot capture for an event based on configured quality settings.
-     * Uses default 2-second post-event duration.
+     * Uses default 4-second post-event duration to capture celebration animations.
      *
      * @param callback Called when capture is complete with base64-encoded screenshot and optionally MP4 video
      */
@@ -433,7 +615,7 @@ public class VideoRecorder
 
     /**
      * Triggers a video/screenshot capture for an event based on configured quality settings.
-     * Uses default 2-second post-event duration.
+     * Uses default 4-second post-event duration to capture celebration animations.
      *
      * @param callback Called when capture is complete with base64-encoded screenshot and optionally MP4 video
      * @param onEncodingStart Optional callback fired when encoding begins (after recording stops)
@@ -448,14 +630,41 @@ public class VideoRecorder
      *
      * @param callback Called when capture is complete with base64-encoded screenshot and optionally MP4 video
      * @param onEncodingStart Optional callback fired when encoding begins (after recording stops)
-     * @param postEventMs Duration in milliseconds to continue recording after the event (default 2000ms)
+     * @param postEventMs Duration in milliseconds to continue recording after the event (default 4000ms)
      */
     public void captureEventVideo(VideoCallback callback, Runnable onEncodingStart, int postEventMs)
     {
         if (!isRecording.get())
         {
-            log.warn("Cannot capture event: recording not active");
-            callback.onComplete(null, null);
+            // Show one-time chat notification when GPU is unavailable
+            if (gpuUnavailable && !gpuWarningShown)
+            {
+                gpuWarningShown = true;
+                if (chatMessageManager != null)
+                {
+                    chatMessageManager.queue(QueuedMessage.builder()
+                        .type(ChatMessageType.GAMEMESSAGE)
+                        .runeLiteFormattedMessage("<col=ff9040>[OSRS Tracker] GPU plugin required for video. Using screenshot-only mode.</col>")
+                        .build());
+                }
+            }
+
+            if (onEncodingStart != null)
+            {
+                onEncodingStart.run();
+            }
+            captureScreenshotOnly(callback);
+            return;
+        }
+
+        // Guard against overlapping captures - fall back to screenshot if already capturing
+        if (isCapturingPostEvent.get())
+        {
+            if (onEncodingStart != null)
+            {
+                onEncodingStart.run();
+            }
+            captureScreenshotOnly(callback);
             return;
         }
 
@@ -464,7 +673,6 @@ public class VideoRecorder
         // Check if screenshot-only mode
         if (quality == VideoQuality.SCREENSHOT_ONLY)
         {
-            log.debug("Event triggered, capturing screenshot only (Screenshot Only mode)");
             if (onEncodingStart != null)
             {
                 onEncodingStart.run();
@@ -482,9 +690,6 @@ public class VideoRecorder
         {
             bufferMs = 1000;
         }
-
-        log.debug("Event triggered, capturing {}-second video ({}s buffer + {}s post-event) at {} FPS",
-            durationMs / 1000, bufferMs / 1000, postEventMs / 1000, quality.getFps());
 
         isCapturingPostEvent.set(true);
 
@@ -528,11 +733,9 @@ public class VideoRecorder
                     if (shouldBlur)
                     {
                         screenshot = applyHeavyBlur(screenshot);
-                        log.debug("Screenshot blurred due to sensitive content");
                     }
 
                     String screenshotBase64 = imageToBase64(screenshot);
-                    log.debug("Screenshot captured successfully");
                     callback.onComplete(screenshotBase64, null);
                 }
                 catch (Exception e)
@@ -544,72 +747,18 @@ public class VideoRecorder
         });
     }
 
-    /**
-     * Captures a single frame and stores it in the circular buffer.
-     */
-    private void captureFrame()
-    {
-        // Backpressure: skip frame if too many pending encodes
-        if (pendingEncodes.get() >= MAX_PENDING_ENCODES)
-        {
-            return;
-        }
-
-        long currentTime = System.currentTimeMillis();
-        long lastTime = lastFrameTime.get();
-
-        // Update last frame time immediately to prevent duplicate captures
-        if (!lastFrameTime.compareAndSet(lastTime, currentTime))
-        {
-            return;
-        }
-
-        // Check for sensitive content BEFORE requesting frame
-        final boolean shouldBlur = isSensitiveContentVisible();
-
-        // Increment pending count before requesting frame
-        pendingEncodes.incrementAndGet();
-
-        // Request next frame from DrawManager
-        drawManager.requestNextFrameListener(image -> {
-            try
-            {
-                // Encode frame to JPEG asynchronously
-                asyncWriter.submit(() -> {
-                    try
-                    {
-                        encodeAndStoreFrame(image, currentTime, shouldBlur);
-                    }
-                    catch (Exception e)
-                    {
-                        log.error("Failed to encode frame", e);
-                    }
-                    finally
-                    {
-                        pendingEncodes.decrementAndGet();
-                    }
-                });
-            }
-            catch (Exception e)
-            {
-                log.error("Failed to queue frame for encoding", e);
-                pendingEncodes.decrementAndGet();
-            }
-        });
-    }
-
     // Maximum resolution cap (1080p) to normalize upload sizes across different displays
     private static final int MAX_WIDTH = 1920;
     private static final int MAX_HEIGHT = 1080;
 
     /**
-     * Encodes a captured frame to JPEG and stores it in the circular buffer.
-     * Uses simple ImageIO.write() to avoid memory leaks from ImageWriter/ImageOutputStream.
-     * Caps resolution at 1080p to normalize file sizes across different displays (e.g., Retina).
+     * Encodes a captured Image to JPEG and stores it in the circular buffer.
+     * Caps resolution at 1080p to normalize file sizes across different displays.
+     * Blur is deferred to upload phase to save CPU (most frames are overwritten before upload).
      *
      * @param image The image to encode
      * @param timestamp The timestamp for the frame
-     * @param shouldBlur Whether to apply blur for sensitive content
+     * @param shouldBlur Whether to mark this frame for deferred blur
      */
     private void encodeAndStoreFrame(Image image, long timestamp, boolean shouldBlur)
     {
@@ -620,78 +769,156 @@ public class VideoRecorder
                 return;
             }
 
-            // Get dimensions directly from the image
             int sourceWidth = image.getWidth(null);
             int sourceHeight = image.getHeight(null);
-
             if (sourceWidth <= 0 || sourceHeight <= 0)
             {
                 return;
             }
 
-            // Calculate target dimensions (cap at 1080p while maintaining aspect ratio)
-            int targetWidth = sourceWidth;
-            int targetHeight = sourceHeight;
-
-            if (sourceWidth > MAX_WIDTH || sourceHeight > MAX_HEIGHT)
-            {
-                double widthRatio = (double) MAX_WIDTH / sourceWidth;
-                double heightRatio = (double) MAX_HEIGHT / sourceHeight;
-                double scaleFactor = Math.min(widthRatio, heightRatio);
-
-                targetWidth = (int) (sourceWidth * scaleFactor);
-                targetHeight = (int) (sourceHeight * scaleFactor);
-            }
-
-            // Create BufferedImage at target resolution (capped at 1080p)
-            BufferedImage bufferedImage = new BufferedImage(targetWidth, targetHeight, BufferedImage.TYPE_INT_RGB);
-            java.awt.Graphics2D g = bufferedImage.createGraphics();
-            // Use bilinear interpolation for better quality when scaling
-            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            g.drawImage(image, 0, 0, targetWidth, targetHeight, null);
-            g.dispose();
-
-            // Apply blur if sensitive content was detected (rare case)
-            if (shouldBlur)
-            {
-                bufferedImage = applyHeavyBlur(bufferedImage);
-            }
-
-            // Encode to JPEG with lower quality for smaller files
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(30000);
-
-            javax.imageio.ImageWriter jpegWriter = ImageIO.getImageWritersByFormatName("jpg").next();
-            javax.imageio.ImageWriteParam param = jpegWriter.getDefaultWriteParam();
-            param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
-            param.setCompressionQuality(currentJpegQuality);
-
-            javax.imageio.stream.ImageOutputStream ios = ImageIO.createImageOutputStream(baos);
-            jpegWriter.setOutput(ios);
-            jpegWriter.write(null, new javax.imageio.IIOImage(bufferedImage, null, null), param);
-            jpegWriter.dispose();
-            ios.close();
-
-            byte[] jpegBytes = baos.toByteArray();
-
-            // Store in circular buffer
-            int currentCount;
-            synchronized (bufferLock)
-            {
-                int idx = writeIndex.getAndIncrement() % MAX_FRAMES;
-                jpegBuffer[idx] = jpegBytes;
-                timestampBuffer[idx] = timestamp;
-
-                currentCount = frameCount.get();
-                if (currentCount < MAX_FRAMES)
-                {
-                    frameCount.incrementAndGet();
-                }
-            }
-
+            BufferedImage bufferedImage = scaleToMaxResolution(image, sourceWidth, sourceHeight);
+            byte[] jpegBytes = encodeToJpeg(bufferedImage);
+            storeInBuffer(jpegBytes, timestamp, shouldBlur);
         }
         catch (IOException e)
         {
             log.error("Failed to encode frame at timestamp {}", timestamp, e);
+        }
+    }
+
+    /**
+     * Encodes a raw RGBA ByteBuffer from PBO readback into JPEG and stores in the circular buffer.
+     * Performs RGBA-to-RGB conversion with vertical flip (OpenGL origin is bottom-left).
+     *
+     * @param rgbaPixels Raw RGBA pixel data from PBO (bottom-up, OpenGL convention)
+     * @param width The width of the image in pixels
+     * @param height The height of the image in pixels
+     * @param timestamp The timestamp for the frame
+     * @param shouldBlur Whether to mark this frame for deferred blur
+     */
+    private void encodeAndStoreFrame(ByteBuffer rgbaPixels, int width, int height, long timestamp, boolean shouldBlur)
+    {
+        try
+        {
+            if (rgbaPixels == null || width <= 0 || height <= 0)
+            {
+                return;
+            }
+
+            BufferedImage bufferedImage = convertRgbaToBufferedImage(rgbaPixels, width, height);
+            bufferedImage = scaleToMaxResolution(bufferedImage, width, height);
+            byte[] jpegBytes = encodeToJpeg(bufferedImage);
+            storeInBuffer(jpegBytes, timestamp, shouldBlur);
+        }
+        catch (IOException e)
+        {
+            log.error("Failed to encode PBO frame at timestamp {}", timestamp, e);
+        }
+    }
+
+    /**
+     * Converts raw RGBA pixels (bottom-up, OpenGL convention) to a BufferedImage with vertical flip.
+     */
+    private BufferedImage convertRgbaToBufferedImage(ByteBuffer rgbaPixels, int width, int height)
+    {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        rgbaPixels.rewind();
+        int rowBytes = width * 4;
+
+        for (int y = 0; y < height; y++)
+        {
+            int srcRow = (height - 1 - y) * rowBytes;
+            for (int x = 0; x < width; x++)
+            {
+                int srcIdx = srcRow + x * 4;
+                int r = rgbaPixels.get(srcIdx) & 0xFF;
+                int g = rgbaPixels.get(srcIdx + 1) & 0xFF;
+                int b = rgbaPixels.get(srcIdx + 2) & 0xFF;
+                image.setRGB(x, y, (r << 16) | (g << 8) | b);
+            }
+        }
+
+        return image;
+    }
+
+    /**
+     * Scales an image down to MAX_WIDTH x MAX_HEIGHT if it exceeds those dimensions.
+     * Maintains aspect ratio using bilinear interpolation.
+     *
+     * @param source The source image
+     * @param sourceWidth The source width
+     * @param sourceHeight The source height
+     * @return A BufferedImage at target resolution (may be the same as input if no scaling needed)
+     */
+    private BufferedImage scaleToMaxResolution(Image source, int sourceWidth, int sourceHeight)
+    {
+        int targetWidth = sourceWidth;
+        int targetHeight = sourceHeight;
+
+        if (sourceWidth > MAX_WIDTH || sourceHeight > MAX_HEIGHT)
+        {
+            double scaleFactor = Math.min(
+                (double) MAX_WIDTH / sourceWidth,
+                (double) MAX_HEIGHT / sourceHeight
+            );
+            targetWidth = (int) (sourceWidth * scaleFactor);
+            targetHeight = (int) (sourceHeight * scaleFactor);
+        }
+
+        BufferedImage result = new BufferedImage(targetWidth, targetHeight, BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = result.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.drawImage(source, 0, 0, targetWidth, targetHeight, null);
+        g.dispose();
+        return result;
+    }
+
+    /**
+     * Encodes a BufferedImage to JPEG bytes using the current quality setting.
+     *
+     * @param image The image to encode
+     * @return JPEG-encoded bytes
+     * @throws IOException if encoding fails
+     */
+    private byte[] encodeToJpeg(BufferedImage image) throws IOException
+    {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(30000);
+
+        javax.imageio.ImageWriter jpegWriter = ImageIO.getImageWritersByFormatName("jpg").next();
+        javax.imageio.ImageWriteParam param = jpegWriter.getDefaultWriteParam();
+        param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+        param.setCompressionQuality(currentJpegQuality);
+
+        javax.imageio.stream.ImageOutputStream ios = ImageIO.createImageOutputStream(baos);
+        jpegWriter.setOutput(ios);
+        jpegWriter.write(null, new javax.imageio.IIOImage(image, null, null), param);
+        jpegWriter.dispose();
+        ios.close();
+
+        return baos.toByteArray();
+    }
+
+    /**
+     * Stores JPEG bytes in the circular buffer with a timestamp and blur flag.
+     * Blur is deferred to upload phase to save CPU since most frames are overwritten before upload.
+     *
+     * @param jpegBytes The JPEG-encoded frame data
+     * @param timestamp The timestamp for the frame
+     * @param shouldBlur Whether this frame needs blur applied during upload
+     */
+    private void storeInBuffer(byte[] jpegBytes, long timestamp, boolean shouldBlur)
+    {
+        synchronized (bufferLock)
+        {
+            int idx = writeIndex.getAndIncrement() % MAX_FRAMES;
+            jpegBuffer[idx] = jpegBytes;
+            timestampBuffer[idx] = timestamp;
+            needsBlurBuffer[idx] = shouldBlur;
+
+            if (frameCount.get() < MAX_FRAMES)
+            {
+                frameCount.incrementAndGet();
+            }
         }
     }
 
@@ -704,9 +931,6 @@ public class VideoRecorder
      */
     private void finalizeCapture(VideoCallback callback, long videoStartTime, long videoEndTime)
     {
-        log.debug("Finalizing video capture for time window: {} to {} ({}ms duration)",
-            videoStartTime, videoEndTime, videoEndTime - videoStartTime);
-
         // Check for sensitive content before capturing final screenshot
         final boolean shouldBlur = isSensitiveContentVisible();
 
@@ -721,41 +945,62 @@ public class VideoRecorder
                     if (shouldBlur)
                     {
                         screenshot = applyHeavyBlur(screenshot);
-                        log.debug("Final screenshot blurred due to sensitive content");
                     }
 
                     String screenshotBase64 = imageToBase64(screenshot);
 
-                    // Snapshot frames and prepare for upload
-                    UploadTask uploadTask = prepareUpload(videoStartTime, videoEndTime);
+                    // Get FPS for presigned URL request
+                    final int fps = config.videoQuality().getFps();
 
-                    if (uploadTask != null)
+                    // Prepare frames snapshot (fast, on asyncWriter thread)
+                    FrameSnapshot frameSnapshot = prepareFrameSnapshot(videoStartTime, videoEndTime);
+
+                    if (frameSnapshot == null || frameSnapshot.frames.isEmpty())
                     {
-                        log.debug("Uploading {} frames to {}", uploadTask.frames.size(), uploadTask.key);
-
-                        // Store screenshot for use after upload
-                        final String finalScreenshot = screenshotBase64;
-
-                        // Upload async, but only send callback after upload completes
-                        asyncWriter.submit(() -> {
-                            boolean success = uploadFramesToBackblaze(uploadTask.uploadUrl, uploadTask.frames, uploadTask.fps);
-                            if (success)
-                            {
-                                log.debug("Upload complete - sending callback with key {}", uploadTask.key);
-                                callback.onComplete(finalScreenshot, uploadTask.key);
-                            }
-                            else
-                            {
-                                log.error("Upload failed - sending callback without video");
-                                callback.onComplete(finalScreenshot, null);
-                            }
-                        });
-                    }
-                    else
-                    {
-                        log.warn("Failed to prepare upload - returning screenshot only");
                         callback.onComplete(screenshotBase64, null);
+                        return;
                     }
+
+                    // Fetch presigned URL on dedicated API thread to avoid blocking asyncWriter
+                    // This allows encoding threads to continue working while we wait for the API
+                    apiExecutor.submit(() -> {
+                        try
+                        {
+                            PresignedUrlResponse presignedUrl = getPresignedUploadUrl(fps);
+
+                            if (presignedUrl == null)
+                            {
+                                log.error("Failed to get presigned URL - returning screenshot only");
+                                callback.onComplete(screenshotBase64, null);
+                                return;
+                            }
+
+                            if (presignedUrl.quotaExceeded)
+                            {
+                                showQuotaExceededMessage(presignedUrl.message);
+                                callback.onComplete(screenshotBase64, null);
+                                return;
+                            }
+
+                            // Now upload on asyncWriter thread
+                            asyncWriter.submit(() -> {
+                                boolean success = uploadFramesToBackblaze(presignedUrl.uploadUrl, frameSnapshot.frames, fps);
+                                if (success)
+                                {
+                                    callback.onComplete(screenshotBase64, presignedUrl.key);
+                                }
+                                else
+                                {
+                                    callback.onComplete(screenshotBase64, null);
+                                }
+                            });
+                        }
+                        catch (Exception e)
+                        {
+                            log.error("Failed to get presigned URL", e);
+                            callback.onComplete(screenshotBase64, null);
+                        }
+                    });
                 }
                 catch (Exception e)
                 {
@@ -767,29 +1012,28 @@ public class VideoRecorder
     }
 
     /**
-     * Container for upload task data.
+     * Container for frame snapshot data (prepared frames without upload URL).
      */
-    private static class UploadTask
+    private static class FrameSnapshot
     {
-        String uploadUrl;
-        String key;
         List<byte[]> frames;
-        int fps;
     }
 
     /**
-     * Prepares an upload by snapshotting frames and getting a presigned URL.
-     * This is fast - the actual upload happens asynchronously.
+     * Prepares a frame snapshot by extracting frames from the circular buffer.
+     * Applies deferred blur to frames that need it.
+     * This is fast and runs on the asyncWriter thread.
      *
      * @param videoStartTime The start timestamp for the video
      * @param videoEndTime The end timestamp for the video
-     * @return UploadTask with all data needed for async upload, or null on failure
+     * @return FrameSnapshot with prepared frames, or null if no frames available
      */
-    private UploadTask prepareUpload(long videoStartTime, long videoEndTime)
+    private FrameSnapshot prepareFrameSnapshot(long videoStartTime, long videoEndTime)
     {
-        List<byte[]> clipFrames = new ArrayList<>();
+        // First, snapshot frame data from circular buffer (minimal locked time)
+        // We copy references to frame data under lock, then process outside lock
+        List<FrameData> framesToProcess = new ArrayList<>();
 
-        // Snapshot frames from the circular buffer (fast)
         synchronized (bufferLock)
         {
             int count = frameCount.get();
@@ -800,40 +1044,72 @@ public class VideoRecorder
                 int idx = (currentWriteIdx - count + i + MAX_FRAMES) % MAX_FRAMES;
                 long timestamp = timestampBuffer[idx];
                 byte[] frame = jpegBuffer[idx];
+                boolean needsBlur = needsBlurBuffer[idx];
 
                 if (timestamp >= videoStartTime && timestamp <= videoEndTime && frame != null)
                 {
-                    clipFrames.add(frame);
+                    // Copy frame data for processing outside lock
+                    framesToProcess.add(new FrameData(frame, needsBlur));
                 }
             }
         }
 
+        // Process frames outside the lock (apply blur if needed)
+        // This prevents holding the bufferLock during expensive ImageIO operations
+        List<byte[]> clipFrames = new ArrayList<>();
+        int blurAppliedCount = 0;
+
+        for (FrameData frameData : framesToProcess)
+        {
+            byte[] frame = frameData.frame;
+
+            // Apply deferred blur if needed (only for frames that get uploaded)
+            if (frameData.needsBlur)
+            {
+                try
+                {
+                    BufferedImage decoded = ImageIO.read(new java.io.ByteArrayInputStream(frame));
+                    if (decoded != null)
+                    {
+                        BufferedImage blurred = applyHeavyBlur(decoded);
+                        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                        ImageIO.write(blurred, "jpg", baos);
+                        frame = baos.toByteArray();
+                        blurAppliedCount++;
+                    }
+                }
+                catch (IOException e)
+                {
+                    log.error("Failed to apply deferred blur to frame", e);
+                    // Use original frame if blur fails
+                }
+            }
+            clipFrames.add(frame);
+        }
+
         if (clipFrames.isEmpty())
         {
-            log.warn("No frames available for clip in time window {} to {}", videoStartTime, videoEndTime);
             return null;
         }
 
-        log.debug("Snapshotted {} frames for clip", clipFrames.size());
+        FrameSnapshot snapshot = new FrameSnapshot();
+        snapshot.frames = clipFrames;
+        return snapshot;
+    }
 
-        // Get presigned URL (fast API call) - FPS is encoded in the filename
-        int fps = config.videoQuality().getFps();
-        PresignedUrlResponse presignedUrl = getPresignedUploadUrl(fps);
-        if (presignedUrl == null)
+    /**
+     * Simple data class to hold frame data for processing outside synchronized block.
+     */
+    private static class FrameData
+    {
+        final byte[] frame;
+        final boolean needsBlur;
+
+        FrameData(byte[] frame, boolean needsBlur)
         {
-            log.error("Failed to get presigned upload URL");
-            return null;
+            this.frame = frame;
+            this.needsBlur = needsBlur;
         }
-
-        log.debug("Got presigned URL for async upload: {}", presignedUrl.key);
-
-        UploadTask task = new UploadTask();
-        task.uploadUrl = presignedUrl.uploadUrl;
-        task.key = presignedUrl.key;
-        task.frames = clipFrames;
-        task.fps = fps;
-
-        return task;
     }
 
     /**
@@ -843,6 +1119,9 @@ public class VideoRecorder
     {
         String uploadUrl;
         String key;
+        boolean quotaExceeded = false;
+        boolean screenshotOnly = false;
+        String message;
     }
 
     /**
@@ -876,14 +1155,24 @@ public class VideoRecorder
             Response response = httpClient.newCall(request).execute();
             try
             {
+                String body = response.body().string();
+                JsonObject json = gson.fromJson(body, JsonObject.class);
+                
+                if (response.code() == 402)
+                {
+                    PresignedUrlResponse result = new PresignedUrlResponse();
+                    result.quotaExceeded = true;
+                    result.screenshotOnly = json.has("screenshot_only") && json.get("screenshot_only").getAsBoolean();
+                    result.message = json.has("message") ? json.get("message").getAsString() : "Daily video limit reached";
+                    
+                    return result;
+                }
+                
                 if (!response.isSuccessful())
                 {
                     log.error("Failed to get presigned URL: {} - {}", response.code(), response.message());
                     return null;
                 }
-
-                String body = response.body().string();
-                JsonObject json = gson.fromJson(body, JsonObject.class);
 
                 PresignedUrlResponse result = new PresignedUrlResponse();
                 result.uploadUrl = json.get("upload_url").getAsString();
@@ -904,8 +1193,12 @@ public class VideoRecorder
     }
 
     /**
-     * Uploads JPEG frames directly to Backblaze as MJPEG format.
+     * Uploads JPEG frames directly to Backblaze as MJPEG format using streaming.
      * MJPEG is simply concatenated JPEG frames - FFmpeg reads this natively.
+     *
+     * Uses streaming to avoid memory spikes: frames are written directly to the
+     * network socket instead of buffering all frames in memory first.
+     * This eliminates the ~15MB memory spike during upload for 300 high-quality frames.
      *
      * @param uploadUrl The presigned Backblaze upload URL
      * @param frames The list of JPEG frame bytes
@@ -916,28 +1209,45 @@ public class VideoRecorder
     {
         try
         {
-            // MJPEG format: just concatenate all JPEG frames
-            // FFmpeg can read this directly with -f mjpeg
-            ByteArrayOutputStream mjpegBuffer = new ByteArrayOutputStream();
+            long totalSize = frames.stream().mapToInt(f -> f.length).sum();
 
-            for (byte[] frame : frames)
+            // Use streaming RequestBody to avoid buffering all frames in memory
+            // This writes frames directly to the network socket as we iterate
+            final long finalTotalSize = totalSize;
+            RequestBody streamingBody = new RequestBody()
             {
-                mjpegBuffer.write(frame);
-            }
+                @Override
+                public MediaType contentType()
+                {
+                    return MediaType.parse("application/octet-stream");
+                }
 
-            byte[] mjpegBytes = mjpegBuffer.toByteArray();
-            log.debug("Created MJPEG stream: {} bytes ({} frames)", mjpegBytes.length, frames.size());
+                @Override
+                public long contentLength()
+                {
+                    return finalTotalSize; // Required by Backblaze (no chunked encoding)
+                }
 
-            // Upload directly to Backblaze using presigned URL
-            log.debug("Starting direct upload to Backblaze ({} bytes)...", mjpegBytes.length);
+                @Override
+                public void writeTo(BufferedSink sink) throws IOException
+                {
+                    // Stream frames directly to output - no intermediate buffer!
+                    // MJPEG format is just concatenated JPEG frames
+                    for (byte[] frame : frames)
+                    {
+                        sink.write(frame);
+                    }
+                    sink.flush();
+                }
+            };
 
-            RequestBody body = RequestBody.create(MediaType.parse("application/octet-stream"), mjpegBytes);
-
-            // Presigned URL already contains auth - just need matching Content-Type
+            // Presigned URL already contains auth - need Content-Type and Content-Length
+            // Backblaze requires explicit Content-Length header (no chunked encoding)
             Request request = new Request.Builder()
                 .url(uploadUrl)
                 .addHeader("Content-Type", "application/octet-stream")
-                .put(body)
+                .addHeader("Content-Length", String.valueOf(totalSize))
+                .put(streamingBody)
                 .build();
 
             // Use uploadClient with longer timeouts for large uploads
@@ -947,7 +1257,6 @@ public class VideoRecorder
                 String responseBody = response.body() != null ? response.body().string() : "null";
                 if (response.isSuccessful())
                 {
-                    log.debug("Successfully uploaded {} bytes directly to Backblaze", mjpegBytes.length);
                     return true;
                 }
                 else
@@ -978,6 +1287,24 @@ public class VideoRecorder
         ImageIO.write(image, "PNG", baos);
         byte[] imageBytes = baos.toByteArray();
         return Base64.getEncoder().encodeToString(imageBytes);
+    }
+
+    /**
+     * Shows a chat message when video quota is exceeded.
+     * Notifies the user that they've hit their daily limit.
+     */
+    private void showQuotaExceededMessage(String message)
+    {
+        if (chatMessageManager == null)
+        {
+            return;
+        }
+
+        String displayMessage = message != null ? message : "Daily video limit reached";
+        chatMessageManager.queue(QueuedMessage.builder()
+            .type(ChatMessageType.GAMEMESSAGE)
+            .runeLiteFormattedMessage("<col=ff9040>[OSRS Tracker] " + displayMessage + "</col>")
+            .build());
     }
 
     /**
