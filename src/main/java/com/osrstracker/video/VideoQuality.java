@@ -46,33 +46,23 @@ public enum VideoQuality
 	),
 
 	/**
-	 * Low quality video - smaller uploads.
-	 * 10 seconds @ 15 FPS, 50% JPEG quality
+	 * Performance video - reduced FPS for lower CPU overhead.
+	 * 10 seconds @ 20 FPS, 80% JPEG quality, 1080p
+	 * 33% fewer capture calls than Quality mode.
 	 */
-	LOW_QUALITY(
-		"Video: 10s @ 15 FPS (Low)",
+	PERFORMANCE(
+		"Video: Performance (20 FPS)",
 		10000, // 10 seconds
-		15,    // 15 FPS
-		0.50f  // 50% JPEG quality
+		20,    // 20 FPS
+		0.80f  // 80% JPEG quality
 	),
 
 	/**
-	 * Medium quality video - balanced quality and upload size.
-	 * 10 seconds @ 30 FPS, 50% JPEG quality
+	 * Quality video - smooth playback at full frame rate.
+	 * 10 seconds @ 30 FPS, 80% JPEG quality, 1080p
 	 */
-	MEDIUM_QUALITY(
-		"Video: 10s @ 30 FPS (Medium)",
-		10000, // 10 seconds
-		30,    // 30 FPS
-		0.50f  // 50% JPEG quality
-	),
-
-	/**
-	 * High quality video - best quality, larger uploads.
-	 * 10 seconds @ 30 FPS, 80% JPEG quality (~40MB at 1080p)
-	 */
-	HIGH_QUALITY(
-		"Video: 10s @ 30 FPS (High)",
+	QUALITY(
+		"Video: Quality (30 FPS)",
 		10000, // 10 seconds
 		30,    // 30 FPS
 		0.80f  // 80% JPEG quality
@@ -100,7 +90,7 @@ public enum VideoQuality
 	 *
 	 * @return SCREENSHOT_ONLY as the default
 	 */
-	public static VideoQuality getDefaultForCurrentHeap()
+	public static VideoQuality getDefault()
 	{
 		return SCREENSHOT_ONLY;
 	}

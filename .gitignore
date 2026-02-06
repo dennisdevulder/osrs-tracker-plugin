@@ -33,3 +33,4 @@ runelite-cache/
 # Local development
 .claude/
 .env
+run-with-plugin.bat

@@ -28,19 +28,19 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
 import com.osrstracker.api.ApiClient;
+import com.osrstracker.bingo.BingoProgressReporter;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
-import net.runelite.api.events.ChatMessage;
-import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.callback.ClientThread;
-import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -72,6 +72,7 @@ public class ClueScrollTracker
     private final ApiClient apiClient;
     private final OsrsTrackerConfig config;
     private final VideoRecorder videoRecorder;
+    private final BingoProgressReporter bingoProgressReporter;
 
     // State tracking for matching chat message to widget
     private String pendingClueTier = null;
@@ -84,7 +85,8 @@ public class ClueScrollTracker
             ItemManager itemManager,
             ApiClient apiClient,
             OsrsTrackerConfig config,
-            VideoRecorder videoRecorder)
+            VideoRecorder videoRecorder,
+            BingoProgressReporter bingoProgressReporter)
     {
         this.client = client;
         this.clientThread = clientThread;
@@ -92,26 +94,23 @@ public class ClueScrollTracker
         this.apiClient = apiClient;
         this.config = config;
         this.videoRecorder = videoRecorder;
+        this.bingoProgressReporter = bingoProgressReporter;
     }
 
     /**
-     * Listen for clue completion chat messages to capture the tier and count.
+     * Process a game chat message to capture clue completion info.
      * This message appears just before the reward widget opens.
+     * Called by the main plugin's onChatMessage handler.
+     *
+     * @param message The chat message text (should already have HTML tags removed)
      */
-    @Subscribe
-    public void onChatMessage(ChatMessage event)
+    public void processGameMessage(String message)
     {
-        if (event.getType() != ChatMessageType.GAMEMESSAGE)
-        {
-            return;
-        }
-
         if (!config.trackClueScrolls())
         {
             return;
         }
 
-        String message = net.runelite.client.util.Text.removeTags(event.getMessage());
         Matcher matcher = CLUE_COMPLETE_PATTERN.matcher(message);
 
         if (matcher.find())
@@ -129,18 +128,22 @@ public class ClueScrollTracker
     }
 
     /**
-     * Listen for the clue reward widget to load.
-     * When detected, capture the rewards and send to the API.
+     * Returns the widget group ID for the clue reward screen.
+     * Used by the main plugin to check if this tracker should handle the widget.
+     *
+     * @return The InterfaceID for TRAIL_REWARDSCREEN
      */
-    @Subscribe
-    public void onWidgetLoaded(WidgetLoaded event)
+    public int getRewardWidgetGroupId()
     {
-        // InterfaceID.TRAIL_REWARDSCREEN = 73 (treasure trail reward screen)
-        if (event.getGroupId() != InterfaceID.TRAIL_REWARDSCREEN)
-        {
-            return;
-        }
+        return InterfaceID.TRAIL_REWARDSCREEN;
+    }
 
+    /**
+     * Handle the clue reward widget being loaded.
+     * Called by the main plugin's onWidgetLoaded handler.
+     */
+    public void onRewardWidgetLoaded()
+    {
         if (!config.trackClueScrolls())
         {
             return;
@@ -223,6 +226,9 @@ public class ClueScrollTracker
         // Send to API with video capture
         sendClueRewardToApi(tier, completionCount, itemsArray, totalValue);
 
+        // Report to bingo progress (converts JsonArray items to LootItem list)
+        reportToBingo(tier, itemsArray, totalValue);
+
         // Reset state
         resetState();
     }
@@ -259,6 +265,26 @@ public class ClueScrollTracker
                 tier + " clue scroll reward"
             );
         }
+    }
+
+    /**
+     * Report clue completion to bingo progress tracker.
+     */
+    private void reportToBingo(String tier, JsonArray items, long totalValue)
+    {
+        // Convert JsonArray to List<LootItem> for bingo reporter
+        List<BingoProgressReporter.LootItem> lootItems = new ArrayList<>();
+        for (int i = 0; i < items.size(); i++)
+        {
+            JsonObject item = items.get(i).getAsJsonObject();
+            int itemId = item.get("item_id").getAsInt();
+            String name = item.get("name").getAsString();
+            int quantity = item.get("quantity").getAsInt();
+            long value = item.has("total_value") ? item.get("total_value").getAsLong() : 0;
+            lootItems.add(new BingoProgressReporter.LootItem(itemId, name, quantity, value));
+        }
+
+        bingoProgressReporter.reportClueComplete(tier, lootItems, totalValue);
     }
 
     /**

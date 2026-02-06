@@ -22,63 +22,55 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.osrstracker.itemsnitch;
+package com.osrstracker.pets;
 
+import lombok.Builder;
 import lombok.Data;
 
 /**
- * Represents a sighting of a shared item in a player's bank, shared chest,
- * equipment, or inventory. This is sent to the API for tracking.
+ * Data class representing a pet drop event.
  */
 @Data
-public class BankItemSighting
+@Builder
+public class PetDropData
 {
     /**
-     * Valid location values for item sightings.
+     * The name of the pet (e.g., "Vorki", "Noon", "Pet snakeling")
      */
-    public static final String LOCATION_BANK = "bank";
-    public static final String LOCATION_SHARED_CHEST = "shared_chest";
-    public static final String LOCATION_EQUIPMENT = "equipment";
-    public static final String LOCATION_INVENTORY = "inventory";
+    private final String petName;
 
     /**
-     * The OSRS item ID.
+     * The NPC ID of the pet follower, or -1 if unknown
      */
-    private int itemId;
+    private final int npcId;
 
     /**
-     * The display name of the item.
+     * Whether this is a duplicate pet (player already has it)
      */
-    private String name;
+    private final boolean isDuplicate;
 
     /**
-     * The quantity of this item found.
+     * Whether the pet went to backpack (player had another follower out)
      */
-    private int quantity;
+    private final boolean toBackpack;
 
     /**
-     * The location where the item was found.
-     * One of: "bank", "shared_chest", "equipment", "inventory"
+     * Timestamp when the pet was obtained (epoch millis)
      */
-    private String location;
+    private final long timestamp;
 
-    public BankItemSighting()
-    {
-    }
+    /**
+     * Base64-encoded screenshot of the moment
+     */
+    private final String screenshot;
 
-    public BankItemSighting(int itemId, String name, int quantity)
-    {
-        this.itemId = itemId;
-        this.name = name;
-        this.quantity = quantity;
-        this.location = LOCATION_BANK; // Default for backwards compatibility
-    }
+    /**
+     * Video storage key (S3 key) for the capture
+     */
+    private final String videoKey;
 
-    public BankItemSighting(int itemId, String name, int quantity, String location)
-    {
-        this.itemId = itemId;
-        this.name = name;
-        this.quantity = quantity;
-        this.location = location;
-    }
+    /**
+     * The player's RuneScape name
+     */
+    private final String rsn;
 }

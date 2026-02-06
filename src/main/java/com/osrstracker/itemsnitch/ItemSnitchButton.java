@@ -100,14 +100,15 @@ public class ItemSnitchButton
 
     /**
      * Called when the bank widget is loaded (WidgetLoaded event).
-     * Just resets state - actual button creation happens in onBankFinishedBuilding.
+     * Resets state - the bank widget is rebuilt so our old button reference is stale.
      */
     public void onBankOpen()
     {
         log.debug("Bank widget loaded - resetting state");
-        // Only reset filter state, don't touch snitchButton here as
-        // onBankFinishedBuilding may have already created it
+        // Reset both filter state and button reference
+        // The bank widget is rebuilt each time, so any previous button widget is gone
         filterActive = false;
+        snitchButton = null;
     }
 
     /**
@@ -116,9 +117,15 @@ public class ItemSnitchButton
      */
     public void onBankFinishedBuilding()
     {
+        // Don't create a new button if we already have one - bankSearch.layoutBank()
+        // can trigger this callback, and we don't want duplicate buttons
+        if (snitchButton != null)
+        {
+            log.debug("Bank finished building - button already exists, skipping");
+            return;
+        }
+
         log.debug("Bank finished building - creating Item Snitch button");
-        // Reset button reference before creating new one
-        snitchButton = null;
         createButton();
     }
 

@@ -37,6 +37,8 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ServerNpcLoot;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStack;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
@@ -51,11 +53,16 @@ import com.osrstracker.clue.ClueScrollTracker;
 import com.osrstracker.itemsnitch.ItemSnitchTracker;
 import com.osrstracker.itemsnitch.ItemSnitchBankOverlay;
 import com.osrstracker.itemsnitch.ItemSnitchButton;
+import com.osrstracker.bingo.BingoSubscriptionManager;
+import com.osrstracker.bingo.BingoProgressReporter;
+import com.osrstracker.pets.PetTracker;
 import com.osrstracker.video.VideoRecorder;
 import net.runelite.client.ui.overlay.OverlayManager;
 
 import javax.inject.Inject;
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -86,6 +93,20 @@ import java.util.concurrent.atomic.AtomicLong;
 )
 public class OsrsTrackerPlugin extends Plugin
 {
+    // Gauntlet boss NPC IDs (multiple forms/states for each)
+    private static final int[] CRYSTALLINE_HUNLLEF_IDS = {9021, 9022, 9023, 9024};
+    private static final int[] CORRUPTED_HUNLLEF_IDS = {9035, 9036, 9037, 9038};
+
+    // Raid boss NPC IDs (final boss of each raid)
+    // CoX - Great Olm head (both phase variants)
+    private static final int[] GREAT_OLM_HEAD_IDS = {7551, 7554};
+    // ToB - Verzik Vitur phase 3 (both variants)
+    private static final int[] VERZIK_VITUR_P3_IDS = {8374, 8375};
+    // ToA - Tumeken's Warden (damaged/enraged states)
+    private static final int[] TUMEKENS_WARDEN_IDS = {11762, 11764};
+    // ToA - Elidinis' Warden (damaged/enraged states)
+    private static final int[] ELIDINIS_WARDEN_IDS = {11761, 11763};
+
     @Inject
     private Client client;
 
@@ -130,6 +151,15 @@ public class OsrsTrackerPlugin extends Plugin
     private VideoRecorder videoRecorder;
 
     @Inject
+    private BingoSubscriptionManager bingoSubscriptionManager;
+
+    @Inject
+    private BingoProgressReporter bingoProgressReporter;
+
+    @Inject
+    private PetTracker petTracker;
+
+    @Inject
     private OverlayManager overlayManager;
 
     @Inject
@@ -140,6 +170,9 @@ public class OsrsTrackerPlugin extends Plugin
 
     @Inject
     private ConfigManager configManager;
+
+    @Inject
+    private ItemManager itemManager;
 
     // Sidebar navigation button and panel for quick capture
     private NavigationButton quickCaptureButton;
@@ -153,6 +186,11 @@ public class OsrsTrackerPlugin extends Plugin
     private final AtomicLong lastCaptureCompletedTime = new AtomicLong(0);
     private ScheduledExecutorService cooldownExecutor;
 
+    // Track if we're in an active login session to prevent repeated re-initialization
+    // GameState.LOGGED_IN fires frequently during gameplay (region loads, interface closes, etc.)
+    // We only want to initialize trackers once per actual login, not on every state change
+    private volatile boolean sessionActive = false;
+
     @Override
     protected void startUp() throws Exception
     {
@@ -164,16 +202,19 @@ public class OsrsTrackerPlugin extends Plugin
         // Start video recording
         videoRecorder.startRecording();
 
-        // Initialize trackers when already logged in
+        // Initialize trackers when already logged in (plugin enabled mid-session)
         if (client.getGameState() == GameState.LOGGED_IN)
         {
+            log.debug("Plugin started while logged in - initializing trackers");
+            sessionActive = true;
             skillLevelTracker.initializeSkillLevels();
             questTracker.initializeQuestTracking();
             itemSnitchTracker.initialize();
+            bingoSubscriptionManager.initialize();
         }
 
-        // Create the sidebar panel with quick capture button
-        panel = new OsrsTrackerPanel(this::triggerQuickCapture);
+        // Create the sidebar panel with quick capture button and bingo manager
+        panel = new OsrsTrackerPanel(this::triggerQuickCapture, bingoSubscriptionManager);
 
         // Load icon for sidebar
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "quick_capture_icon.png");
@@ -239,10 +280,12 @@ public class OsrsTrackerPlugin extends Plugin
         // Stop video recording
         videoRecorder.stopRecording();
 
-        // Reset all trackers
+        // Reset session state and all trackers
+        sessionActive = false;
         skillLevelTracker.resetSkillTracking();
         questTracker.resetQuestTracking();
         itemSnitchTracker.reset();
+        bingoSubscriptionManager.reset();
     }
 
     /**
@@ -380,22 +423,53 @@ public class OsrsTrackerPlugin extends Plugin
 
     /**
      * Handle login events - initialize all trackers.
+     *
+     * IMPORTANT: GameState.LOGGED_IN fires frequently during gameplay (region loads,
+     * interface closes, cutscenes, etc.), not just on actual login. We use sessionActive
+     * to ensure we only initialize once per actual login session.
      */
     @Subscribe
     public void onGameStateChanged(GameStateChanged gameStateChanged)
     {
-        if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
+        GameState state = gameStateChanged.getGameState();
+
+        if (state == GameState.LOGGED_IN)
         {
-            skillLevelTracker.initializeSkillLevels();
-            questTracker.initializeQuestTracking();
-            itemSnitchTracker.initialize();
+            // Only initialize if this is the start of a new session
+            if (!sessionActive)
+            {
+                log.info("New login session detected - initializing trackers");
+                sessionActive = true;
+                skillLevelTracker.initializeSkillLevels();
+                questTracker.initializeQuestTracking();
+                itemSnitchTracker.initialize();
+                bingoSubscriptionManager.initialize();
+                panel.updateBingoSection();
+            }
+            // else: already in an active session, skip re-initialization
         }
-        else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN ||
-                 gameStateChanged.getGameState() == GameState.HOPPING)
+        else if (state == GameState.LOGIN_SCREEN)
         {
-            // Reset trackers on logout
-            questTracker.resetQuestTracking();
-            itemSnitchTracker.reset();
+            // Full logout - reset session and all trackers
+            if (sessionActive)
+            {
+                log.info("Logout detected - resetting session and trackers");
+                sessionActive = false;
+                skillLevelTracker.resetSkillTracking();
+                questTracker.resetQuestTracking();
+                itemSnitchTracker.reset();
+                bingoSubscriptionManager.reset();
+            }
+        }
+        else if (state == GameState.HOPPING)
+        {
+            // World hop - reset session so we re-initialize after hop completes
+            // This ensures we capture fresh skill levels on the new world
+            if (sessionActive)
+            {
+                log.debug("World hop detected - will re-initialize after hop");
+                sessionActive = false;
+            }
         }
     }
 
@@ -410,11 +484,16 @@ public class OsrsTrackerPlugin extends Plugin
             return;
         }
 
-        skillLevelTracker.checkForLevelUp(statChanged.getSkill());
+        Skill skill = statChanged.getSkill();
+        int level = statChanged.getLevel();
+        int xp = statChanged.getXp();
+        log.debug("StatChanged: {} level={} xp={}", skill.getName(), level, xp);
+
+        skillLevelTracker.checkForLevelUp(skill);
     }
 
     /**
-     * Handle chat messages - delegate to collection log tracker.
+     * Handle chat messages - delegate to collection log, clue scroll, and pet trackers.
      */
     @Subscribe
     public void onChatMessage(ChatMessage chatMessage)
@@ -430,6 +509,153 @@ public class OsrsTrackerPlugin extends Plugin
         if (config.trackCollectionLog())
         {
             collectionLogTracker.processGameMessage(message);
+        }
+
+        // Check for clue scroll completion messages
+        if (config.trackClueScrolls())
+        {
+            clueScrollTracker.processGameMessage(message);
+        }
+
+        // Check for pet drops
+        if (config.trackPets())
+        {
+            petTracker.processGameMessage(message);
+        }
+
+        // Check for slayer task completion
+        checkForSlayerTaskCompletion(message);
+
+        // Check for raid completion (fallback if NPC death detection fails)
+        checkForRaidCompletion(message);
+    }
+
+    /**
+     * Pattern to match raid completion messages.
+     * CoX/ToB/ToA all use: "Congratulations - your raid is complete!"
+     * Also matches ToA specific: "You have completed the Tombs of Amascut"
+     */
+    private static final java.util.regex.Pattern RAID_COMPLETE_PATTERN =
+        java.util.regex.Pattern.compile("Congratulations - your raid is complete!");
+    private static final java.util.regex.Pattern TOA_COMPLETE_PATTERN =
+        java.util.regex.Pattern.compile("You have completed the Tombs of Amascut");
+
+    // Track recent raid completions to avoid duplicate reports (NPC death + chat message)
+    // Using AtomicLong for thread-safe access from game thread and event handlers
+    private final AtomicLong lastRaidCompletionTime = new AtomicLong(0);
+    private static final long RAID_COMPLETION_COOLDOWN_MS = 5000; // 5 second cooldown
+
+    /**
+     * Check if the message indicates a raid completion.
+     * This is a fallback for when NPC death detection doesn't work (e.g., Olm might be an Object).
+     */
+    private void checkForRaidCompletion(String message)
+    {
+        // Check cooldown to avoid duplicate reports
+        long now = System.currentTimeMillis();
+        if (now - lastRaidCompletionTime.get() < RAID_COMPLETION_COOLDOWN_MS)
+        {
+            return;
+        }
+
+        if (RAID_COMPLETE_PATTERN.matcher(message).find())
+        {
+            // Determine which raid based on region/context
+            // For now, we'll detect the raid type based on common patterns
+            // The NPC death detection should usually catch this first
+            String raidName = detectCurrentRaid();
+            if (raidName != null)
+            {
+                log.info("Raid completion detected via chat message: {}", raidName);
+                lastRaidCompletionTime.set(now);
+                bingoProgressReporter.reportRaidComplete(raidName, true, 0, 0);
+            }
+        }
+        else if (TOA_COMPLETE_PATTERN.matcher(message).find())
+        {
+            log.info("ToA completion detected via chat message");
+            lastRaidCompletionTime.set(now);
+            bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
+        }
+    }
+
+    /**
+     * Try to detect which raid the player is currently in based on region ID.
+     */
+    private String detectCurrentRaid()
+    {
+        if (client.getGameState() != GameState.LOGGED_IN)
+        {
+            return null;
+        }
+
+        int regionId = client.getLocalPlayer() != null ?
+            client.getLocalPlayer().getWorldLocation().getRegionID() : 0;
+
+        // CoX regions (Chambers of Xeric)
+        if (isInCoxRegion(regionId))
+        {
+            return "Chambers of Xeric";
+        }
+        // ToB regions (Theatre of Blood)
+        else if (isInTobRegion(regionId))
+        {
+            return "Theatre of Blood";
+        }
+        // ToA regions (Tombs of Amascut)
+        else if (isInToaRegion(regionId))
+        {
+            return "Tombs of Amascut";
+        }
+
+        return null;
+    }
+
+    // CoX region IDs (approximate - Olm room and surrounding areas)
+    private boolean isInCoxRegion(int regionId)
+    {
+        return regionId >= 12889 && regionId <= 13210;
+    }
+
+    // ToB region IDs (Theatre of Blood)
+    private boolean isInTobRegion(int regionId)
+    {
+        return regionId >= 12611 && regionId <= 12869;
+    }
+
+    // ToA region IDs (Tombs of Amascut)
+    private boolean isInToaRegion(int regionId)
+    {
+        return regionId >= 14160 && regionId <= 15696;
+    }
+
+    /**
+     * Pattern to match slayer task completion messages.
+     * Examples:
+     * - "You have completed your task! You killed 150 Abyssal demons."
+     * - "You've completed your task! Contact a Slayer master for a new assignment."
+     */
+    private static final java.util.regex.Pattern SLAYER_TASK_PATTERN =
+        java.util.regex.Pattern.compile("You have completed your task! You killed (\\d+) (.+)\\.");
+
+    /**
+     * Check if the message indicates a slayer task completion.
+     */
+    private void checkForSlayerTaskCompletion(String message)
+    {
+        java.util.regex.Matcher matcher = SLAYER_TASK_PATTERN.matcher(message);
+        if (matcher.find())
+        {
+            int amount = Integer.parseInt(matcher.group(1));
+            String taskName = matcher.group(2);
+            log.info("Slayer task completed: {} x{}", taskName, amount);
+            bingoProgressReporter.reportSlayerTaskComplete(taskName, amount, "Unknown");
+        }
+        // Also check for the simpler message without kill count
+        else if (message.contains("You've completed your task"))
+        {
+            log.info("Slayer task completed (no details)");
+            bingoProgressReporter.reportSlayerTaskComplete("Unknown", 0, "Unknown");
         }
     }
 
@@ -448,46 +674,158 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle loot drops - delegate to loot tracker.
+     * Handle loot drops - delegate to loot tracker and bingo reporter.
+     * This event only fires when YOU receive loot, so it's the reliable signal
+     * that you killed the NPC (or got MVP for group content).
      */
     @Subscribe
     public void onServerNpcLoot(ServerNpcLoot event)
     {
-        if (!config.trackLoot())
+        NPCComposition npc = event.getComposition();
+        String npcName = (npc != null) ? npc.getName() : "Unknown";
+        int npcId = (npc != null) ? npc.getId() : -1;
+
+        // Process for timeline loot tracker (with value threshold)
+        if (config.trackLoot())
+        {
+            lootTracker.processLootDrop(npcName, event.getItems());
+        }
+
+        // Report NPC/boss kill to bingo (only counts YOUR kills since loot = you killed it)
+        bingoProgressReporter.reportNpcKill(npcId, npcName);
+        bingoProgressReporter.reportBossKill(npcId, npcName);
+
+        // Report loot items to bingo (handles loot_item, loot_category, loot_value tiles)
+        reportLootToBingo(npcId, npcName, event.getItems());
+    }
+
+    /**
+     * Converts ItemStack collection to BingoProgressReporter.LootItem list and reports to bingo.
+     */
+    private void reportLootToBingo(int npcId, String npcName, java.util.Collection<ItemStack> items)
+    {
+        if (items == null || items.isEmpty())
         {
             return;
         }
 
-        NPCComposition npc = event.getComposition();
-        String npcName = (npc != null) ? npc.getName() : null;
-        lootTracker.processLootDrop(npcName, event.getItems());
+        List<BingoProgressReporter.LootItem> lootItems = new ArrayList<>();
+        long totalValue = 0;
+
+        for (ItemStack item : items)
+        {
+            int itemId = item.getId();
+            int quantity = item.getQuantity();
+            net.runelite.api.ItemComposition composition = itemManager.getItemComposition(itemId);
+            String itemName = (composition != null) ? composition.getName() : "Unknown";
+            long itemPrice = (long) itemManager.getItemPrice(itemId) * quantity;
+
+            lootItems.add(new BingoProgressReporter.LootItem(itemId, itemName, quantity, itemPrice));
+            totalValue += itemPrice;
+        }
+
+        bingoProgressReporter.reportLoot(npcId, npcName, lootItems, totalValue);
     }
 
     /**
-     * Handle actor deaths - delegate to death tracker.
+     * Handle actor deaths - delegate to death tracker and bingo reporter.
      */
     @Subscribe
     public void onActorDeath(ActorDeath actorDeath)
     {
-        if (!config.trackDeaths())
+        Actor actor = actorDeath.getActor();
+
+        // Track player deaths for timeline
+        if (config.trackDeaths())
         {
-            return;
+            deathTracker.processActorDeath(actor);
         }
 
-        deathTracker.processActorDeath(actorDeath.getActor());
+        // Track NPC deaths for bingo (boss kills, NPC kills, raids, gauntlet)
+        if (actor instanceof NPC)
+        {
+            NPC npc = (NPC) actor;
+            int npcId = npc.getId();
+            String npcName = npc.getName();
+
+            // Check for Gauntlet completion (Hunllef death)
+            if (isNpcIdInArray(npcId, CRYSTALLINE_HUNLLEF_IDS))
+            {
+                log.info("Crystalline Hunllef defeated - Normal Gauntlet complete!");
+                bingoProgressReporter.reportGauntletComplete(false, true, 0, 0);
+            }
+            else if (isNpcIdInArray(npcId, CORRUPTED_HUNLLEF_IDS))
+            {
+                log.info("Corrupted Hunllef defeated - Corrupted Gauntlet complete!");
+                bingoProgressReporter.reportGauntletComplete(true, true, 0, 0);
+            }
+            // Check for Raid completion (final boss death)
+            // Set cooldown to prevent chat message fallback from double-reporting
+            else if (isNpcIdInArray(npcId, GREAT_OLM_HEAD_IDS))
+            {
+                log.info("Great Olm defeated - Chambers of Xeric complete!");
+                lastRaidCompletionTime.set(System.currentTimeMillis());
+                bingoProgressReporter.reportRaidComplete("Chambers of Xeric", true, 0, 0);
+            }
+            else if (isNpcIdInArray(npcId, VERZIK_VITUR_P3_IDS))
+            {
+                log.info("Verzik Vitur defeated - Theatre of Blood complete!");
+                lastRaidCompletionTime.set(System.currentTimeMillis());
+                bingoProgressReporter.reportRaidComplete("Theatre of Blood", true, 0, 0);
+            }
+            else if (isNpcIdInArray(npcId, TUMEKENS_WARDEN_IDS) || isNpcIdInArray(npcId, ELIDINIS_WARDEN_IDS))
+            {
+                log.info("Warden defeated - Tombs of Amascut complete!");
+                lastRaidCompletionTime.set(System.currentTimeMillis());
+                bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
+            }
+            // Note: NPC/boss kill counting is handled in onServerNpcLoot
+            // which only fires when YOU receive loot (you killed it or got MVP)
+        }
     }
 
     /**
-     * Handle widget loaded events - for bank open detection.
+     * Helper method to check if an NPC ID is in an array of IDs.
+     */
+    private boolean isNpcIdInArray(int npcId, int[] ids)
+    {
+        for (int id : ids)
+        {
+            if (id == npcId)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Widget group IDs for interface detection
+    private static final int BANK_WIDGET_GROUP_ID = 12;
+    private static final int GIM_SHARED_STORAGE_WIDGET_GROUP_ID = 725;
+
+    /**
+     * Handle widget loaded events - for bank open, shared chest open, and clue scroll reward detection.
      */
     @Subscribe
     public void onWidgetLoaded(WidgetLoaded event)
     {
         // Bank interface group ID is 12
-        if (event.getGroupId() == 12)
+        if (event.getGroupId() == BANK_WIDGET_GROUP_ID)
         {
             itemSnitchTracker.onBankOpen();
             itemSnitchButton.onBankOpen();
+        }
+
+        // GIM Shared Storage interface group ID is 725
+        if (event.getGroupId() == GIM_SHARED_STORAGE_WIDGET_GROUP_ID)
+        {
+            itemSnitchTracker.onSharedChestOpen();
+        }
+
+        // Check for clue scroll reward widget
+        if (config.trackClueScrolls() && event.getGroupId() == clueScrollTracker.getRewardWidgetGroupId())
+        {
+            clueScrollTracker.onRewardWidgetLoaded();
         }
     }
 
@@ -506,30 +844,50 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle widget closed events - for bank close detection.
+     * Handle widget closed events - for bank close and shared chest close detection.
      */
     @Subscribe
     public void onWidgetClosed(WidgetClosed event)
     {
         // Bank interface group ID is 12
-        if (event.getGroupId() == 12)
+        if (event.getGroupId() == BANK_WIDGET_GROUP_ID)
         {
             itemSnitchTracker.onBankClose();
             itemSnitchButton.onBankClose();
         }
+
+        // GIM Shared Storage interface group ID is 725
+        if (event.getGroupId() == GIM_SHARED_STORAGE_WIDGET_GROUP_ID)
+        {
+            itemSnitchTracker.onSharedChestClose();
+        }
     }
 
     /**
-     * Handle item container changes - for bank item scanning.
+     * Handle item container changes - for bank and shared chest item scanning.
      */
     @Subscribe
     public void onItemContainerChanged(ItemContainerChanged event)
     {
+        int containerId = event.getContainerId();
+
         // Bank container ID
-        if (event.getContainerId() == InventoryID.BANK.getId())
+        if (containerId == InventoryID.BANK.getId())
         {
             itemSnitchTracker.onBankItemsChanged();
             itemSnitchButton.refresh();
+        }
+
+        // GIM Shared Storage container ID
+        if (containerId == InventoryID.GROUP_STORAGE.getId())
+        {
+            itemSnitchTracker.onSharedChestItemsChanged();
+        }
+
+        // Inventory changes while shared chest is open (items moved to/from chest)
+        if (containerId == InventoryID.INVENTORY.getId() && itemSnitchTracker.isSharedChestOpen())
+        {
+            itemSnitchTracker.onSharedChestItemsChanged();
         }
     }
 
@@ -561,7 +919,7 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle game ticks - check for quality setting changes.
+     * Handle game ticks - check for quality setting changes and bingo refresh.
      */
     @Subscribe
     public void onGameTick(GameTick gameTick)
@@ -571,6 +929,9 @@ public class OsrsTrackerPlugin extends Plugin
 
         // Handle delayed quest sync
         questTracker.onGameTick();
+
+        // Check for bingo subscription refresh (polls every 5 min if active event)
+        bingoSubscriptionManager.checkForRefresh();
     }
 
     /**
