@@ -348,7 +348,6 @@ public class ItemSnitchTracker
         ItemContainer container = client.getItemContainer(containerId);
         if (container == null)
         {
-            log.debug("{} container not available", location);
             return;
         }
 
@@ -381,7 +380,6 @@ public class ItemSnitchTracker
                 currentSharedItems.put(key, sighting);
                 foundCount++;
 
-                log.debug("Found shared item in {}: {} x{}", location, itemName, item.getQuantity());
             }
         }
 

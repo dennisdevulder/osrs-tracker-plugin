@@ -81,7 +81,7 @@ public class DeathTracker
             return;
         }
 
-        log.info("Player death detected");
+        log.debug("Player death detected");
         sendDeathEventToApi();
     }
 

@@ -403,7 +403,7 @@ public class BingoProgressReporter
                         // Log completion
                         if (progress.has("completed") && progress.get("completed").getAsBoolean())
                         {
-                            log.info("Bingo tile completed! ID: {}", tileId);
+                            log.debug("Bingo tile completed! ID: {}", tileId);
                         }
                     }
                 }

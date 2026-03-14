@@ -116,7 +116,7 @@ public class PetTracker
      */
     private void handlePetDrop(boolean toBackpack, boolean isDuplicate)
     {
-        log.info("Pet drop detected! Backpack: {}, Duplicate: {}", toBackpack, isDuplicate);
+        log.debug("Pet drop detected! Backpack: {}, Duplicate: {}", toBackpack, isDuplicate);
 
         // Try to identify the pet from the player's follower
         // Use invokeLater to ensure we're on the client thread and follower has spawned
@@ -124,7 +124,7 @@ public class PetTracker
             String petName = identifyPet(toBackpack);
             int petNpcId = getPetNpcId();
 
-            log.info("Pet identified: {} (NPC ID: {})", petName, petNpcId);
+            log.debug("Pet identified: {} (NPC ID: {})", petName, petNpcId);
 
             // Capture extended video and send to API
             sendPetDropToApi(petName, petNpcId, toBackpack, isDuplicate);
@@ -279,7 +279,7 @@ public class PetTracker
                 videoBase64
             );
 
-            log.info("Pet drop event sent to API: {}", eventDescription);
+            log.debug("Pet drop event sent to API: {}", eventDescription);
         });
     }
 }

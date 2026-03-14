@@ -122,7 +122,6 @@ public class BingoSubscriptionManager
         long now = System.currentTimeMillis();
         if (now - lastFetchTime >= POLL_INTERVAL_MS)
         {
-            log.debug("Polling for bingo subscription updates");
             fetchSubscriptions();
         }
     }
@@ -137,7 +136,6 @@ public class BingoSubscriptionManager
 
         if (apiToken == null || apiToken.isEmpty())
         {
-            log.debug("API token not configured, bingo tracking disabled");
             return;
         }
 
@@ -178,33 +176,6 @@ public class BingoSubscriptionManager
 
                         // Determine if we should poll
                         updatePollingStrategy();
-
-                        // Log the result
-                        if (subscription.isHasActiveEvent())
-                        {
-                            BingoSubscription.BingoEventInfo event = subscription.getEvent();
-                            log.debug("Bingo tracking active: {} (tracking {} bosses, {} NPCs, {} items)",
-                                event != null ? event.getName() : "Unknown",
-                                subscription.getSubscriptions().getBossIds().size(),
-                                subscription.getSubscriptions().getNpcIds().size(),
-                                subscription.getSubscriptions().getItemIds().size());
-
-                            // Log tile progress with proof milestones
-                            for (BingoSubscription.TileProgress tile : subscription.getTileProgress())
-                            {
-                                log.debug("  Tile {}: {} - count={}/{}, nextProofMilestone={}, proofInterval={}",
-                                    tile.getTileId(),
-                                    tile.getDescription(),
-                                    tile.getCurrentCount(),
-                                    tile.getRequiredCount(),
-                                    tile.getNextProofMilestone(),
-                                    tile.getProofInterval());
-                            }
-                        }
-                        else
-                        {
-                            log.debug("No active bingo event for user");
-                        }
 
                         // Notify listeners if state changed
                         if (wasActive != subscription.isHasActiveEvent())
@@ -415,7 +386,6 @@ public class BingoSubscriptionManager
     {
         if (!hasActiveEvent())
         {
-            log.debug("needsProofForNpcKill: No active event");
             return false;
         }
 
@@ -438,9 +408,6 @@ public class BingoSubscriptionManager
                     int currentCount = tile.getCurrentCount();
                     Integer nextMilestone = tile.getNextProofMilestone();
                     boolean needsProof = tile.needsProofAtCount(currentCount + 1);
-                    log.debug("Tile {} ({}): currentCount={}, nextMilestone={}, checkCount={}, needsProof={}",
-                        tile.getTileId(), tile.getDescription(), currentCount, nextMilestone, currentCount + 1, needsProof);
-
                     if (needsProof)
                     {
                         return true;

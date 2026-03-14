@@ -129,7 +129,7 @@ public class SkillLevelTracker
             }
 
             initialized = true;
-            log.info("Skill level tracking enabled - {} skills tracked with actual levels captured", previousSkillLevels.size());
+            log.debug("Skill level tracking enabled - {} skills tracked with actual levels captured", previousSkillLevels.size());
 
             // Process any level-ups that occurred during the initialization window
             // (only if we had valid baselines - not when starting from 0)
@@ -144,14 +144,14 @@ public class SkillLevelTracker
                     // and this is just the initial stat population, not a real level-up
                     if (baselineLevel != null && baselineLevel > 0 && currentLevel > baselineLevel)
                     {
-                        log.info("Deferred level up: {} {} -> {}", skill.getName(), baselineLevel, currentLevel);
+                        log.debug("Deferred level up: {} {} -> {}", skill.getName(), baselineLevel, currentLevel);
                         sendLevelUpToApi(skill, baselineLevel, currentLevel);
                         realLevelUps++;
                     }
                 }
                 if (realLevelUps > 0)
                 {
-                    log.info("Processed {} real level-ups that occurred during initialization", realLevelUps);
+                    log.debug("Processed {} real level-ups that occurred during initialization", realLevelUps);
                 }
                 pendingLevelUps.clear();
             }
@@ -238,7 +238,7 @@ public class SkillLevelTracker
         // Detect if the level increased
         if (currentLevel > previousLevel)
         {
-            log.info("Level up detected: {} {} -> {}", skill.getName(), previousLevel, currentLevel);
+            log.debug("Level up detected: {} {} -> {}", skill.getName(), previousLevel, currentLevel);
             sendLevelUpToApi(skill, previousLevel, currentLevel);
 
             // Update stored level for future comparisons

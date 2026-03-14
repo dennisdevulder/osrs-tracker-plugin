@@ -90,7 +90,7 @@ public class LootTracker
         // Use a default name if the NPC name is null
         String sourceName = (npcName != null) ? npcName : "Unknown";
 
-        log.info("Loot received from {}: {} items", sourceName, items.size());
+        log.debug("Loot received from {}: {} items", sourceName, items.size());
 
         // Calculate total loot value and build item list
         LootDropData lootData = calculateLootValue(items);

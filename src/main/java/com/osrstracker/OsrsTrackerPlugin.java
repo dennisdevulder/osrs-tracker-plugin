@@ -194,7 +194,7 @@ public class OsrsTrackerPlugin extends Plugin
     @Override
     protected void startUp() throws Exception
     {
-        log.info("OSRS Tracker started!");
+        log.debug("OSRS Tracker started!");
 
         // Register clue scroll tracker with event bus
         eventBus.register(clueScrollTracker);
@@ -247,7 +247,7 @@ public class OsrsTrackerPlugin extends Plugin
             .build();
 
         clientToolbar.addNavigation(quickCaptureButton);
-        log.info("Quick capture button added to sidebar");
+        log.debug("Quick capture button added to sidebar");
 
         // Register Item Snitch bank overlay and load sprites
         overlayManager.add(itemSnitchBankOverlay);
@@ -257,7 +257,7 @@ public class OsrsTrackerPlugin extends Plugin
     @Override
     protected void shutDown() throws Exception
     {
-        log.info("OSRS Tracker stopped!");
+        log.debug("OSRS Tracker stopped!");
 
         // Unregister clue scroll tracker from event bus
         eventBus.unregister(clueScrollTracker);
@@ -331,7 +331,7 @@ public class OsrsTrackerPlugin extends Plugin
         // Update UI to recording state
         panel.setRecordingState();
 
-        log.info("Quick capture triggered!");
+        log.debug("Quick capture triggered!");
         clientThread.invokeLater(() ->
             client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "OSRS Tracker: Quick capture started! Recording 2 more seconds...", null)
         );
@@ -438,7 +438,7 @@ public class OsrsTrackerPlugin extends Plugin
             // Only initialize if this is the start of a new session
             if (!sessionActive)
             {
-                log.info("New login session detected - initializing trackers");
+                log.debug("New login session detected - initializing trackers");
                 sessionActive = true;
                 skillLevelTracker.initializeSkillLevels();
                 questTracker.initializeQuestTracking();
@@ -453,7 +453,7 @@ public class OsrsTrackerPlugin extends Plugin
             // Full logout - reset session and all trackers
             if (sessionActive)
             {
-                log.info("Logout detected - resetting session and trackers");
+                log.debug("Logout detected - resetting session and trackers");
                 sessionActive = false;
                 skillLevelTracker.resetSkillTracking();
                 questTracker.resetQuestTracking();
@@ -485,9 +485,6 @@ public class OsrsTrackerPlugin extends Plugin
         }
 
         Skill skill = statChanged.getSkill();
-        int level = statChanged.getLevel();
-        int xp = statChanged.getXp();
-        log.debug("StatChanged: {} level={} xp={}", skill.getName(), level, xp);
 
         skillLevelTracker.checkForLevelUp(skill);
     }
@@ -566,14 +563,14 @@ public class OsrsTrackerPlugin extends Plugin
             String raidName = detectCurrentRaid();
             if (raidName != null)
             {
-                log.info("Raid completion detected via chat message: {}", raidName);
+                log.debug("Raid completion detected via chat message: {}", raidName);
                 lastRaidCompletionTime.set(now);
                 bingoProgressReporter.reportRaidComplete(raidName, true, 0, 0);
             }
         }
         else if (TOA_COMPLETE_PATTERN.matcher(message).find())
         {
-            log.info("ToA completion detected via chat message");
+            log.debug("ToA completion detected via chat message");
             lastRaidCompletionTime.set(now);
             bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
         }
@@ -648,13 +645,13 @@ public class OsrsTrackerPlugin extends Plugin
         {
             int amount = Integer.parseInt(matcher.group(1));
             String taskName = matcher.group(2);
-            log.info("Slayer task completed: {} x{}", taskName, amount);
+            log.debug("Slayer task completed: {} x{}", taskName, amount);
             bingoProgressReporter.reportSlayerTaskComplete(taskName, amount, "Unknown");
         }
         // Also check for the simpler message without kill count
         else if (message.contains("You've completed your task"))
         {
-            log.info("Slayer task completed (no details)");
+            log.debug("Slayer task completed (no details)");
             bingoProgressReporter.reportSlayerTaskComplete("Unknown", 0, "Unknown");
         }
     }
@@ -751,31 +748,31 @@ public class OsrsTrackerPlugin extends Plugin
             // Check for Gauntlet completion (Hunllef death)
             if (isNpcIdInArray(npcId, CRYSTALLINE_HUNLLEF_IDS))
             {
-                log.info("Crystalline Hunllef defeated - Normal Gauntlet complete!");
+                log.debug("Crystalline Hunllef defeated - Normal Gauntlet complete!");
                 bingoProgressReporter.reportGauntletComplete(false, true, 0, 0);
             }
             else if (isNpcIdInArray(npcId, CORRUPTED_HUNLLEF_IDS))
             {
-                log.info("Corrupted Hunllef defeated - Corrupted Gauntlet complete!");
+                log.debug("Corrupted Hunllef defeated - Corrupted Gauntlet complete!");
                 bingoProgressReporter.reportGauntletComplete(true, true, 0, 0);
             }
             // Check for Raid completion (final boss death)
             // Set cooldown to prevent chat message fallback from double-reporting
             else if (isNpcIdInArray(npcId, GREAT_OLM_HEAD_IDS))
             {
-                log.info("Great Olm defeated - Chambers of Xeric complete!");
+                log.debug("Great Olm defeated - Chambers of Xeric complete!");
                 lastRaidCompletionTime.set(System.currentTimeMillis());
                 bingoProgressReporter.reportRaidComplete("Chambers of Xeric", true, 0, 0);
             }
             else if (isNpcIdInArray(npcId, VERZIK_VITUR_P3_IDS))
             {
-                log.info("Verzik Vitur defeated - Theatre of Blood complete!");
+                log.debug("Verzik Vitur defeated - Theatre of Blood complete!");
                 lastRaidCompletionTime.set(System.currentTimeMillis());
                 bingoProgressReporter.reportRaidComplete("Theatre of Blood", true, 0, 0);
             }
             else if (isNpcIdInArray(npcId, TUMEKENS_WARDEN_IDS) || isNpcIdInArray(npcId, ELIDINIS_WARDEN_IDS))
             {
-                log.info("Warden defeated - Tombs of Amascut complete!");
+                log.debug("Warden defeated - Tombs of Amascut complete!");
                 lastRaidCompletionTime.set(System.currentTimeMillis());
                 bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
             }
@@ -954,7 +951,7 @@ public class OsrsTrackerPlugin extends Plugin
             if (parsedValue < OsrsTrackerConfig.MINIMUM_LOOT_VALUE)
             {
                 // Value is below minimum, reset to 100k
-                log.info("Minimum loot value {} ({} GP) is below 100k minimum, resetting to 100k", newValue, parsedValue);
+                log.debug("Minimum loot value {} ({} GP) is below 100k minimum, resetting to 100k", newValue, parsedValue);
                 configManager.setConfiguration("osrstracker", "minimumLootValue", "100k");
 
                 // Notify user

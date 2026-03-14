@@ -110,7 +110,7 @@ public class QuestTracker
             pendingSyncTicks--;
             if (pendingSyncTicks == 0)
             {
-                log.info("Executing delayed quest sync");
+                log.debug("Executing delayed quest sync");
                 syncCompletedQuests();
             }
         }
@@ -147,7 +147,7 @@ public class QuestTracker
             return;
         }
 
-        log.info("Syncing {} completed quests to server", completedQuests.size());
+        log.debug("Syncing {} completed quests to server", completedQuests.size());
 
         // Build JSON payload with quest names array
         JsonObject payload = new JsonObject();
@@ -197,14 +197,14 @@ public class QuestTracker
         // Check if quest points increased (and we have a valid baseline)
         if (currentQuestPoints > previousQuestPoints && previousQuestPoints > 0)
         {
-            log.info("Quest points increased: {} -> {}", previousQuestPoints, currentQuestPoints);
+            log.debug("Quest points increased: {} -> {}", previousQuestPoints, currentQuestPoints);
 
             // Attempt to extract the quest name from the completion widget
             String questName = extractQuestNameFromWidget();
 
             if (questName != null && !questName.equals(lastCompletedQuestName))
             {
-                log.info("Quest completed: {}", questName);
+                log.debug("Quest completed: {}", questName);
                 sendQuestCompletionToApi(questName);
                 lastCompletedQuestName = questName;
             }

@@ -221,7 +221,7 @@ public class ClueScrollTracker
         String tier = pendingClueTier != null ? pendingClueTier : "unknown";
         int completionCount = pendingClueCount;
 
-        log.info("Processing {} clue scroll reward: {} items worth {} gp", tier, itemCount, totalValue);
+        log.debug("Processing {} clue scroll reward: {} items worth {} gp", tier, itemCount, totalValue);
 
         // Send to API with video capture
         sendClueRewardToApi(tier, completionCount, itemsArray, totalValue);

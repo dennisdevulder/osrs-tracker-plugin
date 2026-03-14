@@ -90,7 +90,7 @@ public class CollectionLogTracker
             // Extract the item name from the matched group
             String itemName = matcher.group(1);
 
-            log.info("Collection log item detected: {}", itemName);
+            log.debug("Collection log item detected: {}", itemName);
             sendCollectionLogUpdateToApi(itemName);
 
             return true;
