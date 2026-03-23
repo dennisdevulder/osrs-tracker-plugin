@@ -63,11 +63,15 @@ import javax.inject.Inject;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * OSRS Tracker plugin - Automatically tracks gameplay events and sends them to your OSRS Tracker.
@@ -97,9 +101,9 @@ public class OsrsTrackerPlugin extends Plugin
     private static final int[] CRYSTALLINE_HUNLLEF_IDS = {9021, 9022, 9023, 9024};
     private static final int[] CORRUPTED_HUNLLEF_IDS = {9035, 9036, 9037, 9038};
 
-    // Raid boss NPC IDs (final boss of each raid)
-    // CoX - Great Olm head (both phase variants)
-    private static final int[] GREAT_OLM_HEAD_IDS = {7551, 7554};
+    // Raid boss NPC IDs for secondary detection via onActorDeath.
+    // Primary raid detection uses KC chat messages (see checkForRaidCompletion).
+    // CoX is intentionally omitted — Great Olm can behave as an Object, making death detection unreliable.
     // ToB - Verzik Vitur phase 3 (both variants)
     private static final int[] VERZIK_VITUR_P3_IDS = {8374, 8375};
     // ToA - Tumeken's Warden (damaged/enraged states)
@@ -490,7 +494,11 @@ public class OsrsTrackerPlugin extends Plugin
     }
 
     /**
-     * Handle chat messages - delegate to collection log, clue scroll, and pet trackers.
+     * Handle chat messages - delegate to collection log, clue scroll, pet, and raid trackers.
+     *
+     * Raid KC messages arrive as GAMEMESSAGE ("Your completed Chambers of Xeric count is: 52").
+     * The generic "Congratulations - your raid is complete!" can arrive as FRIENDSCHATNOTIFICATION,
+     * but we don't need it — the KC message that follows is more reliable and names the raid.
      */
     @Subscribe
     public void onChatMessage(ChatMessage chatMessage)
@@ -523,107 +531,89 @@ public class OsrsTrackerPlugin extends Plugin
         // Check for slayer task completion
         checkForSlayerTaskCompletion(message);
 
-        // Check for raid completion (fallback if NPC death detection fails)
+        // Check for raid completion via KC message (primary detection method)
         checkForRaidCompletion(message);
     }
 
     /**
-     * Pattern to match raid completion messages.
-     * CoX/ToB/ToA all use: "Congratulations - your raid is complete!"
-     * Also matches ToA specific: "You have completed the Tombs of Amascut"
+     * Raid completion detection via kill count chat messages.
+     *
+     * OSRS sends a KC message after every raid completion that explicitly names the raid:
+     *   - "Your completed Chambers of Xeric count is: 52"
+     *   - "Your Theatre of Blood completion count is: 30"
+     *   - "Your completed Tombs of Amascut count is: 15"
+     *
+     * This is more reliable than NPC death detection (e.g., Great Olm can behave as an Object)
+     * or region-based detection (fragile region ID ranges).
      */
-    private static final java.util.regex.Pattern RAID_COMPLETE_PATTERN =
-        java.util.regex.Pattern.compile("Congratulations - your raid is complete!");
-    private static final java.util.regex.Pattern TOA_COMPLETE_PATTERN =
-        java.util.regex.Pattern.compile("You have completed the Tombs of Amascut");
+    private static final Pattern RAID_KC_PRIMARY_PATTERN = Pattern.compile(
+        "Your (.+?) (?:kill|chest|completion|success) count is:? ([\\d,]+)",
+        Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern RAID_KC_SECONDARY_PATTERN = Pattern.compile(
+        "Your completed (.+?) count is:? ([\\d,]+)",
+        Pattern.CASE_INSENSITIVE
+    );
 
-    // Track recent raid completions to avoid duplicate reports (NPC death + chat message)
-    // Using AtomicLong for thread-safe access from game thread and event handlers
+    // Map of lowercase raid KC names to the canonical raid names we report
+    private static final Map<String, String> RAID_NAME_MAP = Map.of(
+        "chambers of xeric", "Chambers of Xeric",
+        "chambers of xeric challenge mode", "Chambers of Xeric",
+        "theatre of blood", "Theatre of Blood",
+        "theatre of blood: hard mode", "Theatre of Blood",
+        "tombs of amascut", "Tombs of Amascut",
+        "tombs of amascut: entry mode", "Tombs of Amascut",
+        "tombs of amascut: expert mode", "Tombs of Amascut"
+    );
+
+    // Track recent raid completions to avoid duplicate reports (NPC death + KC message)
     private final AtomicLong lastRaidCompletionTime = new AtomicLong(0);
-    private static final long RAID_COMPLETION_COOLDOWN_MS = 5000; // 5 second cooldown
+    private static final long RAID_COMPLETION_COOLDOWN_MS = 5000;
 
     /**
-     * Check if the message indicates a raid completion.
-     * This is a fallback for when NPC death detection doesn't work (e.g., Olm might be an Object).
+     * Check if the message is a raid kill count message and report the completion.
+     * This is the primary raid completion detection — more reliable than NPC death events.
      */
     private void checkForRaidCompletion(String message)
     {
-        // Check cooldown to avoid duplicate reports
         long now = System.currentTimeMillis();
         if (now - lastRaidCompletionTime.get() < RAID_COMPLETION_COOLDOWN_MS)
         {
             return;
         }
 
-        if (RAID_COMPLETE_PATTERN.matcher(message).find())
+        String raidName = parseRaidKcMessage(message);
+        if (raidName != null)
         {
-            // Determine which raid based on region/context
-            // For now, we'll detect the raid type based on common patterns
-            // The NPC death detection should usually catch this first
-            String raidName = detectCurrentRaid();
-            if (raidName != null)
-            {
-                log.debug("Raid completion detected via chat message: {}", raidName);
-                lastRaidCompletionTime.set(now);
-                bingoProgressReporter.reportRaidComplete(raidName, true, 0, 0);
-            }
-        }
-        else if (TOA_COMPLETE_PATTERN.matcher(message).find())
-        {
-            log.debug("ToA completion detected via chat message");
+            log.debug("Raid completion detected via KC message: {}", raidName);
             lastRaidCompletionTime.set(now);
-            bingoProgressReporter.reportRaidComplete("Tombs of Amascut", true, 0, 0);
+            bingoProgressReporter.reportRaidComplete(raidName, true, 0, 0);
         }
     }
 
     /**
-     * Try to detect which raid the player is currently in based on region ID.
+     * Attempts to parse a raid kill count message and returns the canonical raid name,
+     * or null if the message is not a raid KC message.
      */
-    private String detectCurrentRaid()
+    private String parseRaidKcMessage(String message)
     {
-        if (client.getGameState() != GameState.LOGGED_IN)
+        // Try secondary pattern first (matches "Your completed X count is:")
+        // This covers CoX and ToA which use the "completed" prefix
+        Matcher secondary = RAID_KC_SECONDARY_PATTERN.matcher(message);
+        if (secondary.find())
         {
-            return null;
+            return RAID_NAME_MAP.get(secondary.group(1).trim().toLowerCase());
         }
 
-        int regionId = client.getLocalPlayer() != null ?
-            client.getLocalPlayer().getWorldLocation().getRegionID() : 0;
-
-        // CoX regions (Chambers of Xeric)
-        if (isInCoxRegion(regionId))
+        // Try primary pattern (matches "Your X completion count is:")
+        // This covers ToB which uses the "completion" suffix
+        Matcher primary = RAID_KC_PRIMARY_PATTERN.matcher(message);
+        if (primary.find())
         {
-            return "Chambers of Xeric";
-        }
-        // ToB regions (Theatre of Blood)
-        else if (isInTobRegion(regionId))
-        {
-            return "Theatre of Blood";
-        }
-        // ToA regions (Tombs of Amascut)
-        else if (isInToaRegion(regionId))
-        {
-            return "Tombs of Amascut";
+            return RAID_NAME_MAP.get(primary.group(1).trim().toLowerCase());
         }
 
         return null;
-    }
-
-    // CoX region IDs (approximate - Olm room and surrounding areas)
-    private boolean isInCoxRegion(int regionId)
-    {
-        return regionId >= 12889 && regionId <= 13210;
-    }
-
-    // ToB region IDs (Theatre of Blood)
-    private boolean isInTobRegion(int regionId)
-    {
-        return regionId >= 12611 && regionId <= 12869;
-    }
-
-    // ToA region IDs (Tombs of Amascut)
-    private boolean isInToaRegion(int regionId)
-    {
-        return regionId >= 14160 && regionId <= 15696;
     }
 
     /**
@@ -632,15 +622,15 @@ public class OsrsTrackerPlugin extends Plugin
      * - "You have completed your task! You killed 150 Abyssal demons."
      * - "You've completed your task! Contact a Slayer master for a new assignment."
      */
-    private static final java.util.regex.Pattern SLAYER_TASK_PATTERN =
-        java.util.regex.Pattern.compile("You have completed your task! You killed (\\d+) (.+)\\.");
+    private static final Pattern SLAYER_TASK_PATTERN =
+        Pattern.compile("You have completed your task! You killed (\\d+) (.+)\\.");
 
     /**
      * Check if the message indicates a slayer task completion.
      */
     private void checkForSlayerTaskCompletion(String message)
     {
-        java.util.regex.Matcher matcher = SLAYER_TASK_PATTERN.matcher(message);
+        Matcher matcher = SLAYER_TASK_PATTERN.matcher(message);
         if (matcher.find())
         {
             int amount = Integer.parseInt(matcher.group(1));
@@ -756,14 +746,9 @@ public class OsrsTrackerPlugin extends Plugin
                 log.debug("Corrupted Hunllef defeated - Corrupted Gauntlet complete!");
                 bingoProgressReporter.reportGauntletComplete(true, true, 0, 0);
             }
-            // Check for Raid completion (final boss death)
-            // Set cooldown to prevent chat message fallback from double-reporting
-            else if (isNpcIdInArray(npcId, GREAT_OLM_HEAD_IDS))
-            {
-                log.debug("Great Olm defeated - Chambers of Xeric complete!");
-                lastRaidCompletionTime.set(System.currentTimeMillis());
-                bingoProgressReporter.reportRaidComplete("Chambers of Xeric", true, 0, 0);
-            }
+            // Secondary raid completion detection via final boss death.
+            // Primary detection uses KC chat messages (see checkForRaidCompletion).
+            // CoX (Great Olm) is handled exclusively via KC messages since Olm may not trigger onActorDeath.
             else if (isNpcIdInArray(npcId, VERZIK_VITUR_P3_IDS))
             {
                 log.debug("Verzik Vitur defeated - Theatre of Blood complete!");

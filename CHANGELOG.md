@@ -5,6 +5,33 @@ All notable changes to the OSRS Tracker RuneLite plugin will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-03-23
+
+### Fixed
+- **Loot drops missing `item_id` in API payload** ([#116](https://github.com/dennisdevulder/osrs-tracker/issues/116))
+  - `LootTracker` now includes `item_id` in the JSON sent to `/api/webhooks/loot_drop`
+  - Previously only sent `name`, `quantity`, `value` — breaking bingo tile matching for all loot-based tiles
+  - Consistent with how `ClueScrollTracker` and `BingoProgressReporter` already include `item_id`
+
+- **CoX (Chambers of Xeric) completion not detected** ([#110](https://github.com/dennisdevulder/osrs-tracker/issues/110))
+  - Replaced unreliable NPC death detection (Great Olm can behave as an Object) and fragile region ID checks with regex-based kill count chat message detection
+  - Now parses "Your completed Chambers of Xeric count is: X" messages directly — same proven approach used by DropTracker.io
+  - Covers all raid variants: CoX, CoX Challenge Mode, ToB, ToB Hard Mode, ToA Entry/Normal/Expert
+
+- **Item Snitch stale sightings not cleared when items removed** ([#111](https://github.com/dennisdevulder/osrs-tracker/issues/111))
+  - `ItemSnitchTracker` now sends `scanned_locations` parameter to the API, telling the server which containers were scanned
+  - Reports are sent even when no shared items are found, so stale sightings at empty locations get cleared
+  - Previously, taking an item out of the shared chest and closing it left a stale "in shared chest" sighting on the website
+
+### Changed
+- **Raid completion detection rewritten** — primary detection now uses KC chat messages instead of NPC death events
+  - Removed `GREAT_OLM_HEAD_IDS` constant and Olm death detection (unreliable)
+  - Removed region-based raid identification (`isInCoxRegion`, `isInTobRegion`, `isInToaRegion`)
+  - Added `RAID_KC_PRIMARY_PATTERN` and `RAID_KC_SECONDARY_PATTERN` for parsing KC messages
+  - Added `RAID_NAME_MAP` for canonicalizing raid names (including hard mode/challenge mode variants)
+  - ToB and ToA NPC death detection kept as secondary signal (works reliably for those raids)
+- Cleaned up inline `java.util.regex` references to use proper imports
+
 ## [1.1.0] - 2026-02-02
 
 ### Added

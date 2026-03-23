@@ -135,6 +135,7 @@ public class LootTracker
 
             // Build JSON object for this item
             JsonObject itemJson = new JsonObject();
+            itemJson.addProperty("item_id", itemStack.getId());
             itemJson.addProperty("name", itemComposition.getName());
             itemJson.addProperty("quantity", itemStack.getQuantity());
             itemJson.addProperty("value", itemTotalValue);

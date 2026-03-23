@@ -85,6 +85,9 @@ public class ItemSnitchTracker
     // Items found in current bank session (keyed by "location:itemId" for uniqueness across locations)
     private final Map<String, BankItemSighting> currentSharedItems = new ConcurrentHashMap<>();
 
+    // Locations that were scanned in this session (sent to API so it can clear stale sightings)
+    private final Set<String> scannedLocations = ConcurrentHashMap.newKeySet();
+
     // Track if bank is currently open
     private volatile boolean bankOpen = false;
 
@@ -174,6 +177,10 @@ public class ItemSnitchTracker
         bankOpen = true;
         reportSentThisSession = false;
         currentSharedItems.clear();
+        scannedLocations.clear();
+        scannedLocations.add(BankItemSighting.LOCATION_BANK);
+        scannedLocations.add(BankItemSighting.LOCATION_EQUIPMENT);
+        scannedLocations.add(BankItemSighting.LOCATION_INVENTORY);
         log.debug("Bank opened, scanning for shared items");
 
         // Scan bank, equipment, and inventory on next game tick to ensure items are loaded
@@ -200,8 +207,8 @@ public class ItemSnitchTracker
             showSharedItemsWarning();
         }
 
-        // Report sightings to API if we haven't already
-        if (!currentSharedItems.isEmpty() && !reportSentThisSession && config.itemSnitchReportSightings())
+        // Report sightings to API (including empty reports to clear stale sightings)
+        if (!reportSentThisSession && config.itemSnitchReportSightings())
         {
             reportItemSightingsToApi();
         }
@@ -233,6 +240,10 @@ public class ItemSnitchTracker
         sharedChestOpen = true;
         reportSentThisSession = false;
         currentSharedItems.clear();
+        scannedLocations.clear();
+        scannedLocations.add(BankItemSighting.LOCATION_SHARED_CHEST);
+        scannedLocations.add(BankItemSighting.LOCATION_EQUIPMENT);
+        scannedLocations.add(BankItemSighting.LOCATION_INVENTORY);
         log.debug("Shared chest opened, scanning for shared items");
 
         // Scan all containers on next game tick to ensure items are loaded
@@ -252,8 +263,8 @@ public class ItemSnitchTracker
         sharedChestOpen = false;
         log.debug("Shared chest closed");
 
-        // Report sightings to API
-        if (!currentSharedItems.isEmpty() && config.itemSnitchReportSightings())
+        // Report sightings to API (including empty reports to clear stale sightings)
+        if (!reportSentThisSession && config.itemSnitchReportSightings())
         {
             reportItemSightingsToApi();
         }
@@ -537,7 +548,7 @@ public class ItemSnitchTracker
      */
     private void reportItemSightingsToApi()
     {
-        if (currentSharedItems.isEmpty() || reportSentThisSession)
+        if (reportSentThisSession)
         {
             return;
         }
@@ -567,6 +578,15 @@ public class ItemSnitchTracker
         }
         payload.add("items", itemsArray);
 
+        // Tell the server which locations were scanned so it can clear stale sightings
+        // for items no longer present in those locations
+        JsonArray locationsArray = new JsonArray();
+        for (String location : scannedLocations)
+        {
+            locationsArray.add(location);
+        }
+        payload.add("scanned_locations", locationsArray);
+
         // Send to API
         apiClient.sendEventToApi(
             "/api/webhooks/item_sighting",
@@ -575,7 +595,8 @@ public class ItemSnitchTracker
         );
 
         reportSentThisSession = true;
-        log.debug("Reported {} item sightings to API", currentSharedItems.size());
+        log.debug("Reported {} item sightings across {} scanned locations to API",
+            currentSharedItems.size(), scannedLocations.size());
     }
 
     /**
