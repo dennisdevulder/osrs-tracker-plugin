@@ -35,6 +35,8 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ServerNpcLoot;
+import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.http.api.loottracker.LootRecordType;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.game.ItemManager;
@@ -684,6 +686,24 @@ public class OsrsTrackerPlugin extends Plugin
 
         // Report loot items to bingo (handles loot_item, loot_category, loot_value tiles)
         reportLootToBingo(npcId, npcName, event.getItems());
+    }
+
+    /**
+     * Handle chest/raid/event loot via LootReceived (requires built-in Loot Tracker enabled).
+     * Only processes EVENT type to avoid duplicating NPC drops already handled by ServerNpcLoot.
+     */
+    @Subscribe
+    public void onLootReceived(LootReceived event)
+    {
+        if (event.getType() != LootRecordType.EVENT)
+        {
+            return;
+        }
+
+        if (config.trackLoot())
+        {
+            lootTracker.processLootDrop(event.getName(), event.getItems());
+        }
     }
 
     /**
