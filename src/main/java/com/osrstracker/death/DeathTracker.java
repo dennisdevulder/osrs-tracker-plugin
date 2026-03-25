@@ -37,12 +37,6 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.time.Instant;
 
-/**
- * Tracks player death events by monitoring ActorDeath events.
- *
- * When the local player dies, this tracker captures the event and reports it
- * to the API with a video recording of the death.
- */
 @Slf4j
 @Singleton
 public class DeathTracker
@@ -51,6 +45,8 @@ public class DeathTracker
     private final ApiClient apiClient;
     private final OsrsTrackerConfig config;
     private final VideoRecorder videoRecorder;
+
+    private static final int DEATH_POST_EVENT_MS = 5000;
 
     @Inject
     public DeathTracker(Client client, ApiClient apiClient, OsrsTrackerConfig config, VideoRecorder videoRecorder)
@@ -61,20 +57,13 @@ public class DeathTracker
         this.videoRecorder = videoRecorder;
     }
 
-    /**
-     * Processes an ActorDeath event to check if the local player died.
-     *
-     * @param actor The actor that died
-     */
     public void processActorDeath(Actor actor)
     {
-        // Check if death tracking is enabled
         if (!config.trackDeaths())
         {
             return;
         }
 
-        // Only track if the dead actor is the local player
         Player localPlayer = client.getLocalPlayer();
         if (localPlayer == null || actor != localPlayer)
         {
@@ -85,31 +74,13 @@ public class DeathTracker
         sendDeathEventToApi();
     }
 
-    // Death events need longer post-event capture to show the full death animation
-    private static final int DEATH_POST_EVENT_MS = 5000; // 5 seconds
-
-    /**
-     * Sends a death event to the API with video capture.
-     * Uses 5-second post-event duration to capture the full death animation.
-     */
     private void sendDeathEventToApi()
     {
-        // Capture video with the death event - use 5 seconds post-event for death animation
         videoRecorder.captureEventVideo(
             (screenshotBase64, videoBase64) -> {
                 JsonObject payload = new JsonObject();
                 payload.addProperty("timestamp", Instant.now().toString());
 
-                // Get player location if available
-                Player localPlayer = client.getLocalPlayer();
-                if (localPlayer != null)
-                {
-                    payload.addProperty("x", localPlayer.getWorldLocation().getX());
-                    payload.addProperty("y", localPlayer.getWorldLocation().getY());
-                    payload.addProperty("plane", localPlayer.getWorldLocation().getPlane());
-                }
-
-                // Send with video
                 apiClient.sendEventToApi(
                     "/api/webhooks/death",
                     payload.toString(),
@@ -118,7 +89,7 @@ public class DeathTracker
                     videoBase64
                 );
             },
-            null, // No encoding start callback needed
+            null,
             DEATH_POST_EVENT_MS
         );
     }
