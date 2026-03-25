@@ -34,3 +34,4 @@ runelite-cache/
 .claude/
 .env
 run-with-plugin.bat
+CLAUDE.md
