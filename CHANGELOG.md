@@ -6,13 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.2.0] - 2026-03-25
-
-### Fixed
-- Fix loot drops missing `item_id` in API payload
-- Fix CoX completion not detected — use KC chat messages instead of NPC death
-- Fix Item Snitch stale sightings not cleared when items removed
-- Fix death tracker crash from accessing client API on async video thread
-- Add raid/chest loot tracking via LootReceived event (CoX, ToB, ToA, Barrows, etc.)
+- Fix loot item_id, CoX detection, Item Snitch stale sightings, death tracker
+- Add raid/chest loot tracking (CoX, ToB, ToA, Barrows, etc.)
 
 ## [1.1.0] - 2026-02-02
 
