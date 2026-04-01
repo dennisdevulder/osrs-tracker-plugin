@@ -33,7 +33,7 @@ import java.nio.IntBuffer;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
-import static org.lwjgl.vulkan.KHRVideoEncodeH264.*;
+import static org.lwjgl.vulkan.EXTVideoEncodeH264.*;
 import static org.lwjgl.vulkan.KHRVideoEncodeQueue.*;
 import static org.lwjgl.vulkan.KHRVideoQueue.*;
 import static org.lwjgl.vulkan.VK10.*;
@@ -58,7 +58,7 @@ public class VulkanDevice implements AutoCloseable
     private static final String[] REQUIRED_DEVICE_EXTENSIONS = {
         VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
         VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME,
-        VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME,
+        VK_EXT_VIDEO_ENCODE_H264_EXTENSION_NAME,
     };
 
     public void initialize()

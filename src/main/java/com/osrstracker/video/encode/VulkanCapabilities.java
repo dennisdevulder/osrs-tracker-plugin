@@ -32,7 +32,8 @@ import org.lwjgl.vulkan.*;
 import java.nio.IntBuffer;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.vulkan.KHRVideoEncodeH264.*;
+import static org.lwjgl.vulkan.EXTVideoEncodeH264.*;
+import static org.lwjgl.vulkan.video.STDVulkanVideoCodecH264.*;
 import static org.lwjgl.vulkan.KHRVideoEncodeQueue.*;
 import static org.lwjgl.vulkan.KHRVideoQueue.*;
 import static org.lwjgl.vulkan.VK10.*;
@@ -64,14 +65,14 @@ public class VulkanCapabilities
      */
     public VkVideoProfileInfoKHR buildVideoProfile(MemoryStack stack)
     {
-        VkVideoEncodeH264ProfileInfoKHR h264Profile = VkVideoEncodeH264ProfileInfoKHR.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_KHR)
+        VkVideoEncodeH264ProfileInfoEXT h264Profile = VkVideoEncodeH264ProfileInfoEXT.calloc(stack)
+            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_EXT)
             .stdProfileIdc(STD_VIDEO_H264_PROFILE_IDC_BASELINE);
 
         return VkVideoProfileInfoKHR.calloc(stack)
             .sType(VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR)
             .pNext(h264Profile)
-            .videoCodecOperation(VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR)
+            .videoCodecOperation(VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_EXT)
             .chromaSubsampling(VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR)
             .lumaBitDepth(VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR)
             .chromaBitDepth(VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR);
@@ -88,8 +89,8 @@ public class VulkanCapabilities
             VkPhysicalDevice physDevice = vulkanDevice.getPhysicalDevice();
             VkVideoProfileInfoKHR videoProfile = buildVideoProfile(stack);
 
-            VkVideoEncodeH264CapabilitiesKHR h264Caps = VkVideoEncodeH264CapabilitiesKHR.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_KHR);
+            VkVideoEncodeH264CapabilitiesEXT h264Caps = VkVideoEncodeH264CapabilitiesEXT.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_EXT);
 
             VkVideoEncodeCapabilitiesKHR encodeCaps = VkVideoEncodeCapabilitiesKHR.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR)
