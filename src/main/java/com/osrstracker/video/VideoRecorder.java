@@ -26,7 +26,7 @@ package com.osrstracker.video;
 
 import lombok.extern.slf4j.Slf4j;
 import com.osrstracker.OsrsTrackerConfig;
-import com.osrstracker.video.encode.MjpegEncoder;
+import com.osrstracker.video.encode.EncoderFallbackChain;
 import com.osrstracker.video.encode.VideoEncoder;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
@@ -151,10 +151,13 @@ public class VideoRecorder
             return t;
         });
 
-        // Initialize the encoder (MJPEG for now)
-        this.encoder = new MjpegEncoder();
+        // Select the best available encoder (Vulkan H.264 if available, otherwise MJPEG)
+        EncoderFallbackChain fallbackChain = new EncoderFallbackChain();
+        this.encoder = fallbackChain.selectEncoder();
 
-        log.debug("Video recorder initialized (encoder={})", encoder.encoderName());
+        log.debug("Video recorder initialized (encoder={}, fallback={})",
+            encoder.encoderName(),
+            fallbackChain.getFallbackReason() != null ? fallbackChain.getFallbackReason() : "none");
     }
 
     // ---- Package-private API for AsyncFrameCapture ----

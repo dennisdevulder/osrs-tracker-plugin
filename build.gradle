@@ -18,6 +18,11 @@ def runeLiteVersion = 'latest.release'
 dependencies {
 	compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
 
+	// Vulkan Video Encode support (pure Java, no native jars)
+	// compileOnly: classes exist at compile time but loaded conditionally at runtime
+	// via reflection in EncoderFallbackChain to gracefully degrade when unavailable
+	compileOnly 'org.lwjgl:lwjgl-vulkan:3.3.4'
+
 	compileOnly 'org.projectlombok:lombok:1.18.30'
 	annotationProcessor 'org.projectlombok:lombok:1.18.30'
 
