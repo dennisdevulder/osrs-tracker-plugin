@@ -104,6 +104,14 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
     private int currentWidth;
     private int currentHeight;
     private int currentFps;
+    private boolean closed = false;
+
+    // Encode lock -- VulkanEncoder is single-threaded (one command buffer, one fence)
+    // but submitFrame may be called from asyncWriter pool (2 threads)
+    private final Object encodeLock = new Object();
+
+    // Max fence wait: 5 seconds. Avoids infinite hang on GPU crash.
+    private static final long FENCE_TIMEOUT_NS = 5_000_000_000L;
 
     public VulkanEncoder(VulkanDevice vulkanDevice, VulkanCapabilities caps)
     {
@@ -127,35 +135,50 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
     @Override
     public void stop()
     {
-        waitIdle();
-        destroyResources();
+        synchronized (encodeLock)
+        {
+            waitIdle();
+            destroyResources();
+            // Close the VulkanDevice we took ownership of
+            vulkanDevice.close();
+        }
         reset();
     }
 
     @Override
     public void submitFrame(ByteBuffer rgbaPixels, int width, int height, long timestamp, boolean needsBlur)
     {
+        // Skip frames with sensitive content -- Vulkan encodes immediately,
+        // can't defer blur like MJPEG does during finalization
+        if (needsBlur)
+        {
+            return;
+        }
+
         if (rgbaPixels == null || width <= 0 || height <= 0)
         {
             return;
         }
 
-        if (width != currentWidth || height != currentHeight)
+        synchronized (encodeLock)
         {
-            waitIdle();
-            destroySessionResources();
-            createSessionAndResources(width, height);
-            currentWidth = width;
-            currentHeight = height;
-        }
+            if (width != currentWidth || height != currentHeight)
+            {
+                waitIdle();
+                destroySessionResources();
+                createSessionAndResources(width, height);
+                currentWidth = width;
+                currentHeight = height;
+            }
 
-        try
-        {
-            encodeFrame(rgbaPixels, width, height, timestamp);
-        }
-        catch (Exception e)
-        {
-            log.error("Failed to encode frame", e);
+            try
+            {
+                encodeFrame(rgbaPixels, width, height, timestamp);
+            }
+            catch (Exception e)
+            {
+                log.error("Failed to encode frame", e);
+            }
         }
     }
 
@@ -237,7 +260,7 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
 
         try (MemoryStack stack = stackPush())
         {
-            vkWaitForFences(device, encodeFence, true, Long.MAX_VALUE);
+            vkWaitForFences(device, encodeFence, true, FENCE_TIMEOUT_NS);
             vkResetFences(device, encodeFence);
             vkResetCommandPool(device, commandPool, 0);
 
@@ -304,7 +327,7 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
                 return;
             }
 
-            vkWaitForFences(device, encodeFence, true, Long.MAX_VALUE);
+            vkWaitForFences(device, encodeFence, true, FENCE_TIMEOUT_NS);
             readBackBitstream(timestamp);
             frameIndex++;
         }
@@ -383,7 +406,7 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
             .seq_parameter_set_id((byte) 0)
             .pic_parameter_set_id((byte) 0)
             .pictureType(isIdr ? STD_VIDEO_H264_PICTURE_TYPE_IDR : STD_VIDEO_H264_PICTURE_TYPE_P)
-            .frame_num(frameIndex);
+            .frame_num(frameIndex % 16); // max_frame_num = 16 (log2_max_frame_num_minus4 = 0)
 
         // Reference lists
         StdVideoEncodeH264ReferenceListsInfo refLists = StdVideoEncodeH264ReferenceListsInfo.calloc(stack);
@@ -470,6 +493,17 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
 
     private void readBackBitstream(long timestamp)
     {
+        // Invalidate CPU cache for HOST_CACHED (non-coherent) bitstream memory
+        try (MemoryStack stack = stackPush())
+        {
+            VkMappedMemoryRange range = VkMappedMemoryRange.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE)
+                .memory(bitstreamMemory)
+                .offset(0)
+                .size(VK_WHOLE_SIZE);
+            vkInvalidateMappedMemoryRanges(vulkanDevice.getDevice(), range);
+        }
+
         ByteBuffer bitstream = memByteBuffer(bitstreamMappedPtr, BITSTREAM_BUFFER_SIZE);
         int dataEnd = findBitstreamEnd(bitstream);
         if (dataEnd <= 0)
@@ -611,6 +645,7 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
         {
             VkCommandPoolCreateInfo poolInfo = VkCommandPoolCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+                .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
                 .queueFamilyIndex(vulkanDevice.getVideoEncodeQueueFamily());
 
             LongBuffer pPool = stack.mallocLong(1);
@@ -879,9 +914,14 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
         VkMemoryRequirements memReqs = VkMemoryRequirements.calloc(stack);
         vkGetBufferMemoryRequirements(device, buffer, memReqs);
 
-        int memTypeIdx = findMemoryType(memReqs.memoryTypeBits(), properties, stack);
-        if (memTypeIdx < 0)
+        int memTypeIdx;
+        try
         {
+            memTypeIdx = findMemoryType(memReqs.memoryTypeBits(), properties, stack);
+        }
+        catch (RuntimeException e)
+        {
+            // Fallback: try without HOST_CACHED (some GPUs don't have it)
             memTypeIdx = findMemoryType(memReqs.memoryTypeBits(),
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, stack);
         }
@@ -924,7 +964,7 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
             }
         }
 
-        return -1;
+        throw new RuntimeException("Failed to find suitable memory type (filter=" + typeFilter + ", props=" + properties + ")");
     }
 
     // ---- Cleanup ----
@@ -933,7 +973,7 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
     {
         if (encodeFence != VK_NULL_HANDLE)
         {
-            vkWaitForFences(vulkanDevice.getDevice(), encodeFence, true, Long.MAX_VALUE);
+            vkWaitForFences(vulkanDevice.getDevice(), encodeFence, true, FENCE_TIMEOUT_NS);
         }
     }
 
@@ -968,32 +1008,85 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
 
     private void destroyImageResources(VkDevice device)
     {
-        if (encodeInputImageView != VK_NULL_HANDLE) { vkDestroyImageView(device, encodeInputImageView, null); encodeInputImageView = VK_NULL_HANDLE; }
-        if (encodeInputImage != VK_NULL_HANDLE) { vkDestroyImage(device, encodeInputImage, null); encodeInputImage = VK_NULL_HANDLE; }
-        if (encodeInputMemory != VK_NULL_HANDLE) { vkFreeMemory(device, encodeInputMemory, null); encodeInputMemory = VK_NULL_HANDLE; }
+        if (encodeInputImageView != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(device, encodeInputImageView, null);
+            encodeInputImageView = VK_NULL_HANDLE;
+        }
+        if (encodeInputImage != VK_NULL_HANDLE)
+        {
+            vkDestroyImage(device, encodeInputImage, null);
+            encodeInputImage = VK_NULL_HANDLE;
+        }
+        if (encodeInputMemory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, encodeInputMemory, null);
+            encodeInputMemory = VK_NULL_HANDLE;
+        }
 
         for (int i = 0; i < 2; i++)
         {
-            if (dpbImageViews[i] != VK_NULL_HANDLE) { vkDestroyImageView(device, dpbImageViews[i], null); dpbImageViews[i] = VK_NULL_HANDLE; }
+            if (dpbImageViews[i] != VK_NULL_HANDLE)
+            {
+                vkDestroyImageView(device, dpbImageViews[i], null);
+                dpbImageViews[i] = VK_NULL_HANDLE;
+            }
         }
-        if (dpbImage != VK_NULL_HANDLE) { vkDestroyImage(device, dpbImage, null); dpbImage = VK_NULL_HANDLE; }
-        if (dpbMemory != VK_NULL_HANDLE) { vkFreeMemory(device, dpbMemory, null); dpbMemory = VK_NULL_HANDLE; }
+        if (dpbImage != VK_NULL_HANDLE)
+        {
+            vkDestroyImage(device, dpbImage, null);
+            dpbImage = VK_NULL_HANDLE;
+        }
+        if (dpbMemory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, dpbMemory, null);
+            dpbMemory = VK_NULL_HANDLE;
+        }
     }
 
     private void destroyBufferResources(VkDevice device)
     {
-        if (bitstreamMappedPtr != 0) { vkUnmapMemory(device, bitstreamMemory); bitstreamMappedPtr = 0; }
-        if (bitstreamBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, bitstreamBuffer, null); bitstreamBuffer = VK_NULL_HANDLE; }
-        if (bitstreamMemory != VK_NULL_HANDLE) { vkFreeMemory(device, bitstreamMemory, null); bitstreamMemory = VK_NULL_HANDLE; }
+        if (bitstreamMappedPtr != 0)
+        {
+            vkUnmapMemory(device, bitstreamMemory);
+            bitstreamMappedPtr = 0;
+        }
+        if (bitstreamBuffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(device, bitstreamBuffer, null);
+            bitstreamBuffer = VK_NULL_HANDLE;
+        }
+        if (bitstreamMemory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, bitstreamMemory, null);
+            bitstreamMemory = VK_NULL_HANDLE;
+        }
 
-        if (stagingMappedPtr != 0) { vkUnmapMemory(device, stagingMemory); stagingMappedPtr = 0; }
-        if (stagingBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, stagingBuffer, null); stagingBuffer = VK_NULL_HANDLE; }
-        if (stagingMemory != VK_NULL_HANDLE) { vkFreeMemory(device, stagingMemory, null); stagingMemory = VK_NULL_HANDLE; }
+        if (stagingMappedPtr != 0)
+        {
+            vkUnmapMemory(device, stagingMemory);
+            stagingMappedPtr = 0;
+        }
+        if (stagingBuffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(device, stagingBuffer, null);
+            stagingBuffer = VK_NULL_HANDLE;
+        }
+        if (stagingMemory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, stagingMemory, null);
+            stagingMemory = VK_NULL_HANDLE;
+        }
     }
 
     @Override
     public void close()
     {
+        if (closed)
+        {
+            return;
+        }
+        closed = true;
         stop();
     }
 }

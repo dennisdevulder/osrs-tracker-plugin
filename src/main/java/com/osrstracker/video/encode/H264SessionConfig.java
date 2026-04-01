@@ -59,6 +59,9 @@ public class H264SessionConfig implements AutoCloseable
     private long videoSession = VK_NULL_HANDLE;
     private long sessionParameters = VK_NULL_HANDLE;
 
+    // Session memory allocations (must be freed on close)
+    private long[] sessionMemoryAllocations;
+
     // Heap-allocated structs that live for the session lifetime
     private StdVideoH264SequenceParameterSet sps;
     private StdVideoH264PictureParameterSet pps;
@@ -148,6 +151,7 @@ public class H264SessionConfig implements AutoCloseable
             vkGetVideoSessionMemoryRequirementsKHR(device, videoSession, pCount, memReqs);
 
             // Allocate and bind memory for each requirement
+            sessionMemoryAllocations = new long[count];
             VkBindVideoSessionMemoryInfoKHR.Buffer bindInfos =
                 VkBindVideoSessionMemoryInfoKHR.calloc(count, stack);
 
@@ -169,6 +173,8 @@ public class H264SessionConfig implements AutoCloseable
                 {
                     throw new RuntimeException("vkAllocateMemory for video session failed: " + result);
                 }
+
+                sessionMemoryAllocations[i] = pMemory.get(0);
 
                 bindInfos.get(i)
                     .sType(VK_STRUCTURE_TYPE_BIND_VIDEO_SESSION_MEMORY_INFO_KHR)
@@ -317,6 +323,19 @@ public class H264SessionConfig implements AutoCloseable
         if (videoSession != VK_NULL_HANDLE)
         {
             vkDestroyVideoSessionKHR(device, videoSession, null);
+        }
+
+        // Free session memory allocations
+        if (sessionMemoryAllocations != null)
+        {
+            for (long mem : sessionMemoryAllocations)
+            {
+                if (mem != VK_NULL_HANDLE)
+                {
+                    vkFreeMemory(device, mem, null);
+                }
+            }
+            sessionMemoryAllocations = null;
         }
 
         // Free heap-allocated std structs
