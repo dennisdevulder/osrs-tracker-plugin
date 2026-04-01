@@ -94,7 +94,7 @@ public class VulkanCapabilities
 
             VkVideoEncodeCapabilitiesKHR encodeCaps = VkVideoEncodeCapabilitiesKHR.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR)
-                .pNext(h264Caps);
+                .pNext(h264Caps.address());
 
             VkVideoCapabilitiesKHR videoCaps = VkVideoCapabilitiesKHR.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR)
