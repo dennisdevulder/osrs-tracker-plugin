@@ -87,13 +87,9 @@ public class EncoderFallbackChain
                 vulkanDevice.getDeviceName(), caps.getMaxWidth(), caps.getMaxHeight(),
                 caps.getMaxDpbSlots());
 
-            // TODO: In Chunk 3, return VulkanEncoder(vulkanDevice, caps) here.
-            // For now, we've confirmed Vulkan encode is available but still use MJPEG.
-            // The VulkanDevice stays open for future use.
-            vulkanDevice.close();
-            fallbackReason = "Vulkan encode detected but encoder not yet implemented";
-            log.debug("Encoder fallback: {}", fallbackReason);
-            return new MjpegEncoder();
+            // VulkanDevice stays open -- VulkanEncoder takes ownership
+            fallbackReason = null;
+            return new VulkanEncoder(vulkanDevice, caps);
         }
         catch (Exception e)
         {
