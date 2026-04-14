@@ -80,6 +80,7 @@ public class VideoRecorder
     private final ChatMessageManager chatMessageManager;
     private final ScheduledExecutorService scheduler;
     private final ExecutorService asyncWriter;
+    private final ExecutorService uploader;
     private final ExecutorService apiExecutor;
     private final OkHttpClient httpClient;
     private final OkHttpClient uploadClient;
@@ -142,6 +143,11 @@ public class VideoRecorder
         });
         this.asyncWriter = Executors.newFixedThreadPool(2, r -> {
             Thread t = new Thread(r, "OSRS-Tracker-Video-Writer");
+            t.setDaemon(true);
+            return t;
+        });
+        this.uploader = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "OSRS-Tracker-Video-Uploader");
             t.setDaemon(true);
             return t;
         });
@@ -521,7 +527,7 @@ public class VideoRecorder
                                 return;
                             }
 
-                            asyncWriter.submit(() -> {
+                            uploader.submit(() -> {
                                 boolean success = uploadClipToBackblaze(presignedUrl.uploadUrl, clipData);
                                 if (success)
                                 {
