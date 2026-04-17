@@ -61,17 +61,8 @@ import com.google.gson.JsonObject;
 
 /**
  * Orchestrates video capture, encoding, and upload for gameplay events.
- *
- * Delegates frame encoding and buffering to a {@link VideoEncoder} implementation.
- * Currently uses {@link MjpegEncoder} (JPEG circular buffer + MJPEG upload).
- * Future: Vulkan H.264 encoder for on-device encoding.
- *
- * This class manages:
- * - AsyncFrameCapture coordination (PBO readback from GPU)
- * - Quality/config management
- * - Sensitive content detection
- * - Presigned URL fetching and upload orchestration
- * - Screenshot capture
+ * Prefers the GL PBO capture path, falling back to the CPU rasterizer when
+ * the GPU plugin is not active.
  */
 @Slf4j
 @Singleton
@@ -89,33 +80,24 @@ public class VideoRecorder
     private final OkHttpClient uploadClient;
     private final Gson gson;
 
-    // The active video encoder (MJPEG for now, Vulkan H.264 later)
     private final VideoEncoder encoder;
 
-    // Recording state
     private final AtomicBoolean isRecording = new AtomicBoolean(false);
     private final AtomicBoolean isCapturingPostEvent = new AtomicBoolean(false);
 
-    // Backpressure: limit concurrent encoding operations
     private final AtomicInteger pendingEncodes = new AtomicInteger(0);
     private static final int MAX_PENDING_ENCODES = 4;
 
-    // Sensitive content detection - cached to avoid expensive widget lookups every frame
     private final AtomicBoolean sensitiveContentVisible = new AtomicBoolean(false);
     private final AtomicLong lastSensitiveCheck = new AtomicLong(0);
     private static final long SENSITIVE_CHECK_INTERVAL_MS = 500;
 
     private AsyncFrameCapture asyncFrameCapture;
+    private SoftwareFrameCapture softwareFrameCapture;
 
-    // Track current capture settings to detect quality changes
     private volatile int currentCaptureFps = 0;
     private volatile float currentJpegQuality = 0.5f;
 
-    // Set when GPU plugin is detected as unavailable
-    private volatile boolean gpuUnavailable = false;
-    private volatile boolean gpuWarningShown = false;
-
-    // Default post-event duration in milliseconds
     private static final int DEFAULT_POST_EVENT_MS = 4000;
 
     @Inject
@@ -160,7 +142,6 @@ public class VideoRecorder
             return t;
         });
 
-        // Select the best available encoder (Vulkan H.264 if available, otherwise MJPEG)
         EncoderFallbackChain fallbackChain = new EncoderFallbackChain();
         this.encoder = fallbackChain.selectEncoder();
 
@@ -173,8 +154,6 @@ public class VideoRecorder
     {
         return "vulkan-h264".equals(encoder.encoderName());
     }
-
-    // ---- Package-private API for AsyncFrameCapture ----
 
     boolean isCurrentlyRecording()
     {
@@ -212,8 +191,6 @@ public class VideoRecorder
             }
         });
     }
-
-    // ---- Sensitive content detection ----
 
     private boolean isSensitiveContentVisible()
     {
@@ -264,17 +241,12 @@ public class VideoRecorder
         return sensitiveContentVisible.get();
     }
 
-    // ---- Recording lifecycle ----
-
     public void startRecording()
     {
         if (isRecording.getAndSet(true))
         {
             return;
         }
-
-        gpuUnavailable = false;
-        gpuWarningShown = false;
 
         VideoQuality quality = config.videoQuality();
         currentCaptureFps = quality.getFps() > 0 ? quality.getFps() : 30;
@@ -294,29 +266,39 @@ public class VideoRecorder
             return;
         }
 
-        if (asyncFrameCapture != null)
-        {
-            asyncFrameCapture.stop();
-            asyncFrameCapture = null;
-        }
-
+        stopCapturePipelines();
         encoder.stop();
         currentCaptureFps = 0;
     }
 
     private void onGpuUnavailable()
     {
-        log.debug("GPU plugin not active, falling back to screenshot-only");
-
         if (asyncFrameCapture != null)
         {
             asyncFrameCapture.stop();
             asyncFrameCapture = null;
         }
 
-        isRecording.set(false);
-        currentCaptureFps = 0;
-        gpuUnavailable = true;
+        if (softwareFrameCapture == null)
+        {
+            log.debug("GPU plugin not active, switching to CPU buffer capture");
+            softwareFrameCapture = new SoftwareFrameCapture(drawManager, client, this);
+            softwareFrameCapture.start();
+        }
+    }
+
+    private void stopCapturePipelines()
+    {
+        if (asyncFrameCapture != null)
+        {
+            asyncFrameCapture.stop();
+            asyncFrameCapture = null;
+        }
+        if (softwareFrameCapture != null)
+        {
+            softwareFrameCapture.stop();
+            softwareFrameCapture = null;
+        }
     }
 
     public void updateCaptureRateIfNeeded()
@@ -332,23 +314,11 @@ public class VideoRecorder
         {
             if (currentCaptureFps != 0)
             {
-                log.debug("Switching to Screenshot Only mode");
-
-                if (asyncFrameCapture != null)
-                {
-                    asyncFrameCapture.stop();
-                    asyncFrameCapture = null;
-                }
-
+                stopCapturePipelines();
                 encoder.stop();
                 currentCaptureFps = 0;
                 currentJpegQuality = 0;
             }
-            return;
-        }
-
-        if (gpuUnavailable)
-        {
             return;
         }
 
@@ -362,12 +332,10 @@ public class VideoRecorder
 
         if (targetFps != currentCaptureFps)
         {
-            log.debug("Capture rate changed from {} to {} FPS", currentCaptureFps, targetFps);
-
             encoder.reset();
             currentCaptureFps = targetFps;
 
-            if (asyncFrameCapture == null)
+            if (asyncFrameCapture == null && softwareFrameCapture == null)
             {
                 asyncFrameCapture = new AsyncFrameCapture(drawManager, this, this::onGpuUnavailable);
                 asyncFrameCapture.start();
@@ -377,7 +345,6 @@ public class VideoRecorder
         }
     }
 
-    // ---- Event capture ----
 
     public void captureEventVideo(VideoCallback callback)
     {
@@ -409,18 +376,6 @@ public class VideoRecorder
     {
         if (!isRecording.get())
         {
-            if (gpuUnavailable && !gpuWarningShown)
-            {
-                gpuWarningShown = true;
-                if (chatMessageManager != null)
-                {
-                    chatMessageManager.queue(QueuedMessage.builder()
-                        .type(ChatMessageType.GAMEMESSAGE)
-                        .runeLiteFormattedMessage("<col=ff9040>[OSRS Tracker] GPU plugin required for video. Using screenshot-only mode.</col>")
-                        .build());
-                }
-            }
-
             if (onEncodingStart != null)
             {
                 onEncodingStart.run();
@@ -501,8 +456,6 @@ public class VideoRecorder
             });
         });
     }
-
-    // ---- Finalize and upload ----
 
     private void finalizeCapture(VideoCallback callback, long videoStartTime, long videoEndTime,
                                  EventKind kind, String description)
@@ -638,9 +591,6 @@ public class VideoRecorder
         return candidate;
     }
 
-    /**
-     * Uploads clip data to Backblaze using streaming to avoid memory spikes.
-     */
     private boolean uploadClipToBackblaze(String uploadUrl, VideoEncoder.ClipData clipData)
     {
         try
@@ -703,8 +653,6 @@ public class VideoRecorder
             return false;
         }
     }
-
-    // ---- Presigned URL ----
 
     private static class PresignedUrlResponse
     {
@@ -774,8 +722,6 @@ public class VideoRecorder
             return null;
         }
     }
-
-    // ---- Screenshot blur (kept here since it's only for screenshots, not video frames) ----
 
     private BufferedImage applyScreenshotBlur(BufferedImage image)
     {
@@ -856,8 +802,6 @@ public class VideoRecorder
         return output;
     }
 
-    // ---- Utilities ----
-
     private String imageToBase64(BufferedImage image) throws IOException
     {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -880,9 +824,6 @@ public class VideoRecorder
             .build());
     }
 
-    /**
-     * Callback interface for video capture completion.
-     */
     public interface VideoCallback
     {
         void onComplete(String screenshotBase64, String videoKey);
