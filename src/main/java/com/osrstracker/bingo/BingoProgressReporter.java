@@ -28,6 +28,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
@@ -136,7 +137,7 @@ public class BingoProgressReporter
                     screenshot != null ? "yes" : "no",
                     videoKey != null ? videoKey : "none");
                 sendProgress("npc_kill", eventData, screenshot, videoKey);
-            }, null);
+            }, EventKind.BINGO, npcName);
         }
         else
         {

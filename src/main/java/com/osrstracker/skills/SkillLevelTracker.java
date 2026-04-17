@@ -27,6 +27,7 @@ package com.osrstracker.skills;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
 import com.osrstracker.api.ApiClient;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -263,7 +264,6 @@ public class SkillLevelTracker
      */
     private void sendLevelUpToApi(Skill skill, int oldLevel, int newLevel)
     {
-        // Capture screenshot and video for level-ups
         videoRecorder.captureEventVideo((screenshotBase64, videoBase64) -> {
             JsonObject payload = new JsonObject();
             payload.addProperty("skill", skill.getName());
@@ -277,6 +277,6 @@ public class SkillLevelTracker
                 screenshotBase64,
                 videoBase64
             );
-        });
+        }, EventKind.LEVEL_UP, skill.getName() + "_" + newLevel);
     }
 }

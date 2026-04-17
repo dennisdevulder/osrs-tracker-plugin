@@ -163,6 +163,23 @@ public interface OsrsTrackerConfig extends Config
         return "";
     }
 
+    /*
+     * Default true so existing configurations (users already running with an
+     * API token) keep uploading as before. Still opt-in overall: if the API
+     * token is blank, uploads are silently off regardless of this setting.
+     */
+    @ConfigItem(
+        keyName = "uploadToPlatform",
+        name = "Upload Clips to Platform",
+        description = "Send captured clips to osrs-tracker.com. Disable to keep clips local only. Has no effect without an API token.",
+        section = apiSection,
+        position = 2
+    )
+    default boolean uploadToPlatform()
+    {
+        return true;
+    }
+
     // ===== Tracking Options =====
 
     @ConfigItem(

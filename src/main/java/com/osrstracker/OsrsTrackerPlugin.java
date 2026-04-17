@@ -58,6 +58,7 @@ import com.osrstracker.itemsnitch.ItemSnitchButton;
 import com.osrstracker.bingo.BingoSubscriptionManager;
 import com.osrstracker.bingo.BingoProgressReporter;
 import com.osrstracker.pets.PetTracker;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import net.runelite.client.ui.overlay.OverlayManager;
 
@@ -105,7 +106,7 @@ public class OsrsTrackerPlugin extends Plugin
 
     // Raid boss NPC IDs for secondary detection via onActorDeath.
     // Primary raid detection uses KC chat messages (see checkForRaidCompletion).
-    // CoX is intentionally omitted — Great Olm can behave as an Object, making death detection unreliable.
+    // CoX is intentionally omitted: Great Olm can behave as an Object, making death detection unreliable.
     // ToB - Verzik Vitur phase 3 (both variants)
     private static final int[] VERZIK_VITUR_P3_IDS = {8374, 8375};
     // ToA - Tumeken's Warden (damaged/enraged states)
@@ -221,6 +222,7 @@ public class OsrsTrackerPlugin extends Plugin
 
         // Create the sidebar panel with quick capture button and bingo manager
         panel = new OsrsTrackerPanel(this::triggerQuickCapture, bingoSubscriptionManager);
+        panel.setReadyState(videoRecorder.isVulkanEncoderActive());
 
         // Load icon for sidebar
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "quick_capture_icon.png");
@@ -321,17 +323,6 @@ public class OsrsTrackerPlugin extends Plugin
             return;
         }
 
-        if (!apiClient.isConfigurationValid())
-        {
-            log.error("Cannot quick capture: API URL or token not configured");
-            panel.setErrorState("Configure API first!");
-            clientThread.invokeLater(() ->
-                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "OSRS Tracker: Please configure API URL and token first!", null)
-            );
-            quickCaptureInProgress.set(false); // Reset since we're not actually capturing
-            return;
-        }
-
         // quickCaptureInProgress is already set to true by compareAndSet above
 
         // Update UI to recording state
@@ -393,7 +384,9 @@ public class OsrsTrackerPlugin extends Plugin
                 startCooldownTimer();
             },
             // Encoding start callback - called when recording stops and encoding begins
-            () -> panel.setEncodingState()
+            () -> panel.setEncodingState(),
+            EventKind.QUICK_CAPTURE,
+            null
         );
     }
 
@@ -417,7 +410,7 @@ public class OsrsTrackerPlugin extends Plugin
 
             if (remainingSeconds <= 0)
             {
-                panel.setReadyState();
+                panel.setReadyState(videoRecorder.isVulkanEncoderActive());
                 cooldownExecutor.shutdown();
             }
             else
@@ -500,7 +493,7 @@ public class OsrsTrackerPlugin extends Plugin
      *
      * Raid KC messages arrive as GAMEMESSAGE ("Your completed Chambers of Xeric count is: 52").
      * The generic "Congratulations - your raid is complete!" can arrive as FRIENDSCHATNOTIFICATION,
-     * but we don't need it — the KC message that follows is more reliable and names the raid.
+     * but we don't need it: the KC message that follows is more reliable and names the raid.
      */
     @Subscribe
     public void onChatMessage(ChatMessage chatMessage)
@@ -574,7 +567,7 @@ public class OsrsTrackerPlugin extends Plugin
 
     /**
      * Check if the message is a raid kill count message and report the completion.
-     * This is the primary raid completion detection — more reliable than NPC death events.
+     * This is the primary raid completion detection, more reliable than NPC death events.
      */
     private void checkForRaidCompletion(String message)
     {

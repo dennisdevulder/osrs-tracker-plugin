@@ -35,3 +35,4 @@ runelite-cache/
 .env
 run-with-plugin.bat
 CLAUDE.md
+install.sh

@@ -18,10 +18,10 @@ def runeLiteVersion = 'latest.release'
 dependencies {
 	compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
 
-	// Vulkan Video Encode support (pure Java, no native jars)
-	// compileOnly: classes exist at compile time but loaded conditionally at runtime
-	// via reflection in EncoderFallbackChain to gracefully degrade when unavailable
-	compileOnly 'org.lwjgl:lwjgl-vulkan:3.3.4'
+	// Vulkan Video Encode support. LWJGL 3.3.6 still exposes the provisional EXT
+	// class names, but the struct layouts and numeric sType values match the
+	// ratified KHR extension, so the same bindings work against modern drivers.
+	compileOnly 'org.lwjgl:lwjgl-vulkan:3.3.6'
 
 	compileOnly 'org.projectlombok:lombok:1.18.30'
 	annotationProcessor 'org.projectlombok:lombok:1.18.30'
@@ -37,4 +37,54 @@ version = '1.0.0'
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
 	options.release.set(11)
+}
+
+// Standalone MJPEG -> MP4 test runner. Separate classpath because the plugin
+// declares lwjgl-vulkan as compileOnly (RuneLite provides it at runtime); the
+// test needs real natives.
+configurations {
+	mjpegTool
+}
+
+dependencies {
+	mjpegTool 'org.lwjgl:lwjgl:3.3.6'
+	mjpegTool 'org.lwjgl:lwjgl:3.3.6:natives-linux'
+	mjpegTool 'org.lwjgl:lwjgl-vulkan:3.3.6'
+	mjpegTool 'org.projectlombok:lombok:1.18.30'
+	mjpegTool 'org.slf4j:slf4j-simple:2.0.13'
+}
+
+task dumpBitstream(type: JavaExec) {
+	group = 'verification'
+	dependsOn classes
+	mainClass = 'com.osrstracker.video.encode.DumpBitstream'
+	classpath = sourceSets.main.output + configurations.mjpegTool
+	systemProperty 'org.lwjgl.system.stackSize', '1024'
+	systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'warn'
+	if (project.hasProperty('mjpeg')) { args project.property('mjpeg') }
+}
+
+task dumpSpsPps(type: JavaExec) {
+	group = 'verification'
+	dependsOn classes
+	mainClass = 'com.osrstracker.video.encode.DumpSpsPps'
+	classpath = sourceSets.main.output + configurations.mjpegTool
+	systemProperty 'org.lwjgl.system.stackSize', '1024'
+	systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'warn'
+	if (project.hasProperty('mjpeg')) { args project.property('mjpeg') }
+}
+
+task runMjpegTool(type: JavaExec) {
+	group = 'verification'
+	description = 'Drive VulkanEncoder against an MJPEG file and write a faststart MP4.'
+	dependsOn classes
+	mainClass = 'com.osrstracker.video.encode.MjpegToMp4Tool'
+	classpath = sourceSets.main.output + configurations.mjpegTool
+	systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'info'
+	// Video struct pNext chains + extension enumeration overflow the default 64 KB stack.
+	systemProperty 'org.lwjgl.system.stackSize', '1024'
+	if (project.hasProperty('mjpeg') && project.hasProperty('out')) {
+		args project.property('mjpeg'), project.property('out'),
+			 project.hasProperty('fps') ? project.property('fps') : '30'
+	}
 }

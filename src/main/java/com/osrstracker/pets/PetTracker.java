@@ -27,6 +27,7 @@ package com.osrstracker.pets;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
 import com.osrstracker.api.ApiClient;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -265,7 +266,6 @@ public class PetTracker
             payload.addProperty("player_name", localPlayer.getName());
         }
 
-        // Capture video with standard duration (6s buffer + 4s post)
         videoRecorder.captureEventVideo((screenshotBase64, videoBase64) -> {
             String eventDescription = isDuplicate
                 ? "Duplicate pet: " + petName
@@ -280,6 +280,6 @@ public class PetTracker
             );
 
             log.debug("Pet drop event sent to API: {}", eventDescription);
-        });
+        }, EventKind.PET, petName);
     }
 }

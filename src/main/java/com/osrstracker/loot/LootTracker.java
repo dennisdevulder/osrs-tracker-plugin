@@ -28,6 +28,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
 import com.osrstracker.api.ApiClient;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ItemComposition;
@@ -154,7 +155,6 @@ public class LootTracker
      */
     private void sendLootDropToApi(String sourceName, LootDropData lootData)
     {
-        // Capture video with the loot drop event
         videoRecorder.captureEventVideo((screenshotBase64, videoBase64) -> {
             JsonObject payload = new JsonObject();
             payload.addProperty("source", sourceName);
@@ -168,7 +168,7 @@ public class LootTracker
                 screenshotBase64,
                 videoBase64
             );
-        });
+        }, EventKind.LOOT, sourceName);
     }
 
     /**

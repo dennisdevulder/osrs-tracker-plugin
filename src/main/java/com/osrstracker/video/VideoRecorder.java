@@ -45,6 +45,9 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Base64;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -164,6 +167,11 @@ public class VideoRecorder
         log.debug("Video recorder initialized (encoder={}, fallback={})",
             encoder.encoderName(),
             fallbackChain.getFallbackReason() != null ? fallbackChain.getFallbackReason() : "none");
+    }
+
+    public boolean isVulkanEncoderActive()
+    {
+        return "vulkan-h264".equals(encoder.encoderName());
     }
 
     // ---- Package-private API for AsyncFrameCapture ----
@@ -373,15 +381,31 @@ public class VideoRecorder
 
     public void captureEventVideo(VideoCallback callback)
     {
-        captureEventVideo(callback, null, DEFAULT_POST_EVENT_MS);
+        captureEventVideo(callback, null, DEFAULT_POST_EVENT_MS, EventKind.GENERIC, null);
     }
 
     public void captureEventVideo(VideoCallback callback, Runnable onEncodingStart)
     {
-        captureEventVideo(callback, onEncodingStart, DEFAULT_POST_EVENT_MS);
+        captureEventVideo(callback, onEncodingStart, DEFAULT_POST_EVENT_MS, EventKind.GENERIC, null);
+    }
+
+    public void captureEventVideo(VideoCallback callback, EventKind kind, String description)
+    {
+        captureEventVideo(callback, null, DEFAULT_POST_EVENT_MS, kind, description);
+    }
+
+    public void captureEventVideo(VideoCallback callback, Runnable onEncodingStart, EventKind kind, String description)
+    {
+        captureEventVideo(callback, onEncodingStart, DEFAULT_POST_EVENT_MS, kind, description);
     }
 
     public void captureEventVideo(VideoCallback callback, Runnable onEncodingStart, int postEventMs)
+    {
+        captureEventVideo(callback, onEncodingStart, postEventMs, EventKind.GENERIC, null);
+    }
+
+    public void captureEventVideo(VideoCallback callback, Runnable onEncodingStart, int postEventMs,
+                                  EventKind kind, String description)
     {
         if (!isRecording.get())
         {
@@ -447,7 +471,7 @@ public class VideoRecorder
             {
                 onEncodingStart.run();
             }
-            finalizeCapture(callback, videoStartTime, videoEndTime);
+            finalizeCapture(callback, videoStartTime, videoEndTime, kind, description);
         }, finalPostEventMs, TimeUnit.MILLISECONDS);
     }
 
@@ -480,7 +504,8 @@ public class VideoRecorder
 
     // ---- Finalize and upload ----
 
-    private void finalizeCapture(VideoCallback callback, long videoStartTime, long videoEndTime)
+    private void finalizeCapture(VideoCallback callback, long videoStartTime, long videoEndTime,
+                                 EventKind kind, String description)
     {
         final boolean shouldBlur = isSensitiveContentVisible();
 
@@ -499,10 +524,23 @@ public class VideoRecorder
 
                     final int fps = config.videoQuality().getFps();
 
-                    // Delegate clip extraction to the encoder
+                    long drainDeadline = System.currentTimeMillis() + 1500;
+                    while (pendingEncodes.get() > 0 && System.currentTimeMillis() < drainDeadline)
+                    {
+                        try { Thread.sleep(10); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                    }
+
                     VideoEncoder.ClipData clipData = encoder.finalizeClip(videoStartTime, videoEndTime);
 
                     if (clipData == null || clipData.getFrames().isEmpty())
+                    {
+                        callback.onComplete(screenshotBase64, null);
+                        return;
+                    }
+
+                    saveClipLocally(clipData, kind, description);
+
+                    if (config.apiToken().isEmpty() || !config.uploadToPlatform())
                     {
                         callback.onComplete(screenshotBase64, null);
                         return;
@@ -553,6 +591,51 @@ public class VideoRecorder
                 }
             });
         });
+    }
+
+    private void saveClipLocally(VideoEncoder.ClipData clipData, EventKind kind, String description)
+    {
+        if (!"video/mp4".equals(clipData.getContentType()))
+        {
+            return;
+        }
+
+        Path root = Paths.get(System.getProperty("user.home"), ".runelite", "osrs-tracker-clips");
+        Path target = kind.subfolder().isEmpty() ? root : root.resolve(kind.subfolder());
+        String slug = slugify(description);
+        if (slug.isEmpty())
+        {
+            slug = "clip_" + System.currentTimeMillis();
+        }
+
+        try
+        {
+            Files.createDirectories(target);
+            Path out = uniquePath(target, slug);
+            Files.write(out, clipData.getFrames().get(0));
+        }
+        catch (Exception e)
+        {
+            log.warn("Failed to save clip to {}", target, e);
+        }
+    }
+
+    private static String slugify(String input)
+    {
+        if (input == null) return "";
+        String cleaned = input.trim().toLowerCase().replaceAll("[^a-z0-9]+", "_");
+        cleaned = cleaned.replaceAll("^_+|_+$", "");
+        return cleaned.length() > 80 ? cleaned.substring(0, 80) : cleaned;
+    }
+
+    private static Path uniquePath(Path dir, String slug)
+    {
+        Path candidate = dir.resolve(slug + ".mp4");
+        for (int i = 2; Files.exists(candidate); i++)
+        {
+            candidate = dir.resolve(slug + "_" + i + ".mp4");
+        }
+        return candidate;
     }
 
     /**

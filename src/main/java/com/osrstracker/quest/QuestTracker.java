@@ -28,6 +28,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
 import com.osrstracker.api.ApiClient;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -260,7 +261,6 @@ public class QuestTracker
      */
     private void sendQuestCompletionToApi(String questName)
     {
-        // Capture video with the quest completion event
         videoRecorder.captureEventVideo((screenshotBase64, videoBase64) -> {
             JsonObject payload = new JsonObject();
             payload.addProperty("quest_name", questName);
@@ -272,6 +272,6 @@ public class QuestTracker
                 screenshotBase64,
                 videoBase64
             );
-        });
+        }, EventKind.QUEST, questName);
     }
 }

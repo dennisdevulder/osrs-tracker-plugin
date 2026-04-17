@@ -293,11 +293,17 @@ public class OsrsTrackerPanel extends PluginPanel
      */
     public void setReadyState()
     {
+        setReadyState(false);
+    }
+
+    public void setReadyState(boolean vulkanActive)
+    {
+        String readyText = vulkanActive ? "Vulkan encoding ready" : "Vulkan't";
         SwingUtilities.invokeLater(() -> {
             captureButton.setEnabled(true);
             captureButton.setText("Quick Capture");
             captureButton.setBackground(new Color(93, 173, 226));
-            statusLabel.setText("Ready to capture");
+            statusLabel.setText(readyText);
             statusLabel.setForeground(COLOR_READY);
         });
     }

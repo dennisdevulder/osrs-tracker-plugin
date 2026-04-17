@@ -49,7 +49,7 @@ public class EncoderFallbackChain
         if (os.contains("mac"))
         {
             fallbackReason = "macOS (MoltenVK does not support Vulkan Video)";
-            log.debug("Encoder fallback: {}", fallbackReason);
+            log.info("Encoder fallback: {}", fallbackReason);
             return new MjpegEncoder();
         }
 
@@ -61,7 +61,7 @@ public class EncoderFallbackChain
         catch (ClassNotFoundException e)
         {
             fallbackReason = "LWJGL Vulkan not on classpath";
-            log.debug("Encoder fallback: {}", fallbackReason);
+            log.info("Encoder fallback: {}", fallbackReason);
             return new MjpegEncoder();
         }
 
@@ -79,7 +79,7 @@ public class EncoderFallbackChain
             {
                 vulkanDevice.close();
                 fallbackReason = "GPU does not support H.264 Vulkan Video Encode";
-                log.debug("Encoder fallback: {}", fallbackReason);
+                log.info("Encoder fallback: {}", fallbackReason);
                 return new MjpegEncoder();
             }
 
@@ -102,7 +102,7 @@ public class EncoderFallbackChain
                 catch (Exception ignored) {}
             }
             fallbackReason = "Vulkan init failed: " + e.getMessage();
-            log.debug("Encoder fallback: {}", fallbackReason);
+            log.info("Encoder fallback: {}", fallbackReason);
             return new MjpegEncoder();
         }
     }
