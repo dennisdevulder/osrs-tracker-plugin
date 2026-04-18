@@ -18,10 +18,8 @@ def runeLiteVersion = 'latest.release'
 dependencies {
 	compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
 
-	// Vulkan Video Encode support. LWJGL 3.3.6 still exposes the provisional EXT
-	// class names, but the struct layouts and numeric sType values match the
-	// ratified KHR extension, so the same bindings work against modern drivers.
-	compileOnly 'org.lwjgl:lwjgl-vulkan:3.3.6'
+	// Bundled at runtime: RuneLite ships lwjgl core but not lwjgl-vulkan.
+	implementation 'org.lwjgl:lwjgl-vulkan:3.3.6'
 
 	compileOnly 'org.projectlombok:lombok:1.18.30'
 	annotationProcessor 'org.projectlombok:lombok:1.18.30'
@@ -39,9 +37,8 @@ tasks.withType(JavaCompile).configureEach {
 	options.release.set(11)
 }
 
-// Standalone MJPEG -> MP4 test runner. Separate classpath because the plugin
-// declares lwjgl-vulkan as compileOnly (RuneLite provides it at runtime); the
-// test needs real natives.
+// Standalone MJPEG -> MP4 test runner. Separate classpath so it can pull in
+// the native lwjgl jars that the RuneLite runtime doesn't need.
 configurations {
 	mjpegTool
 }
