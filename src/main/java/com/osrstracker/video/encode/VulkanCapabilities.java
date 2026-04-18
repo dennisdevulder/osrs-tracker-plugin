@@ -32,7 +32,7 @@ import org.lwjgl.vulkan.*;
 import java.nio.IntBuffer;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.vulkan.EXTVideoEncodeH264.*;
+import static org.lwjgl.vulkan.KHRVideoEncodeH264.*;
 import static org.lwjgl.vulkan.video.STDVulkanVideoCodecH264.*;
 import static org.lwjgl.vulkan.KHRVideoEncodeQueue.*;
 import static org.lwjgl.vulkan.KHRVideoQueue.*;
@@ -54,6 +54,8 @@ public class VulkanCapabilities
     private int maxQualityLevels;
     private int supportedRateControlModes;
     private int pictureFormat = VK_FORMAT_UNDEFINED;
+    private int h264MaxLevelIdc;
+    private int h264StdSyntaxFlags;
 
     public VulkanCapabilities(VulkanDevice vulkanDevice)
     {
@@ -61,18 +63,30 @@ public class VulkanCapabilities
     }
 
     /**
-     * Builds the H.264 Baseline video profile on the given stack.
+     * Builds the H.264 High profile descriptor.
+     *
+     * Chain order: VkVideoProfileInfoKHR -> VkVideoEncodeUsageInfoKHR ->
+     * VkVideoEncodeH264ProfileInfoKHR. Usage info must come before the codec
+     * profile info; otherwise some drivers pick a default rate-control path
+     * that ignores bitrate targets.
      */
     public VkVideoProfileInfoKHR buildVideoProfile(MemoryStack stack)
     {
-        VkVideoEncodeH264ProfileInfoEXT h264Profile = VkVideoEncodeH264ProfileInfoEXT.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_EXT)
-            .stdProfileIdc(STD_VIDEO_H264_PROFILE_IDC_BASELINE);
+        VkVideoEncodeH264ProfileInfoKHR h264Profile = VkVideoEncodeH264ProfileInfoKHR.calloc(stack)
+            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_KHR)
+            .stdProfileIdc(STD_VIDEO_H264_PROFILE_IDC_HIGH);
+
+        VkVideoEncodeUsageInfoKHR usageInfo = VkVideoEncodeUsageInfoKHR.calloc(stack)
+            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_USAGE_INFO_KHR)
+            .pNext(h264Profile.address())
+            .videoUsageHints(VK_VIDEO_ENCODE_USAGE_RECORDING_BIT_KHR)
+            .videoContentHints(VK_VIDEO_ENCODE_CONTENT_RENDERED_BIT_KHR)
+            .tuningMode(VK_VIDEO_ENCODE_TUNING_MODE_HIGH_QUALITY_KHR);
 
         return VkVideoProfileInfoKHR.calloc(stack)
             .sType(VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR)
-            .pNext(h264Profile)
-            .videoCodecOperation(VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_EXT)
+            .pNext(usageInfo.address())
+            .videoCodecOperation(VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR)
             .chromaSubsampling(VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR)
             .lumaBitDepth(VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR)
             .chromaBitDepth(VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR);
@@ -89,8 +103,8 @@ public class VulkanCapabilities
             VkPhysicalDevice physDevice = vulkanDevice.getPhysicalDevice();
             VkVideoProfileInfoKHR videoProfile = buildVideoProfile(stack);
 
-            VkVideoEncodeH264CapabilitiesEXT h264Caps = VkVideoEncodeH264CapabilitiesEXT.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_EXT);
+            VkVideoEncodeH264CapabilitiesKHR h264Caps = VkVideoEncodeH264CapabilitiesKHR.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_KHR);
 
             VkVideoEncodeCapabilitiesKHR encodeCaps = VkVideoEncodeCapabilitiesKHR.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR)
@@ -98,7 +112,7 @@ public class VulkanCapabilities
 
             VkVideoCapabilitiesKHR videoCaps = VkVideoCapabilitiesKHR.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR)
-                .pNext(encodeCaps);
+                .pNext(encodeCaps.address());
 
             int result = vkGetPhysicalDeviceVideoCapabilitiesKHR(physDevice, videoProfile, videoCaps);
             if (result != VK_SUCCESS)
@@ -113,11 +127,17 @@ public class VulkanCapabilities
             maxActiveReferencePictures = videoCaps.maxActiveReferencePictures();
             maxQualityLevels = encodeCaps.maxQualityLevels();
             supportedRateControlModes = encodeCaps.rateControlModes();
+            h264MaxLevelIdc = h264Caps.maxLevelIdc();
+            h264StdSyntaxFlags = h264Caps.stdSyntaxFlags();
             pictureFormat = querySupportedFormat(physDevice, videoProfile, stack);
 
-            log.debug("Vulkan H.264 encode: {}x{}, {} DPB slots, {} refs, {} quality levels, format={}",
+            log.info("Vulkan H.264 encode caps: {}x{}, {} DPB slots, {} refs, {} quality levels, "
+                + "maxLevelIdc={}, stdSyntaxFlags=0x{}, rcModes=0x{}, format={}",
                 maxWidth, maxHeight, maxDpbSlots, maxActiveReferencePictures,
-                maxQualityLevels, pictureFormat);
+                maxQualityLevels, h264MaxLevelIdc,
+                Integer.toHexString(h264StdSyntaxFlags),
+                Integer.toHexString(supportedRateControlModes),
+                pictureFormat);
 
             return true;
         }

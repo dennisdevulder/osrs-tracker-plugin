@@ -28,7 +28,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.*;
-import org.lwjgl.vulkan.video.*;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
@@ -38,26 +37,15 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.*;
-import static org.lwjgl.vulkan.EXTVideoEncodeH264.*;
-import static org.lwjgl.vulkan.KHRVideoEncodeQueue.*;
-import static org.lwjgl.vulkan.KHRVideoQueue.*;
 import static org.lwjgl.vulkan.VK10.*;
-import static org.lwjgl.vulkan.VK13.*;
-import static org.lwjgl.vulkan.video.STDVulkanVideoCodecH264.*;
 
 /**
- * Vulkan H.264 video encoder using hardware video encode extensions.
+ * H.264 video encoder backed by {@code VK_KHR_video_encode_h264}.
  *
- * Architecture: Uses MjpegEncoder's JPEG circular buffer for continuous recording
- * (zero GPU overhead during normal gameplay). When a clip is requested, burst-encodes
- * the JPEG frames to H.264 on the GPU hardware encoder. The GPU can encode 1000+ FPS,
- * so 300 frames takes ~0.3 seconds.
- *
- * This means:
- * - During gameplay: same as MJPEG (JPEG buffer rolling, ~15-30MB memory)
- * - On clip request: GPU burst-encodes JPEG -> H.264, output ~5-7MB instead of 130MB
- * - Zero GPU encode overhead during normal play
+ * Frames captured on the game thread are buffered as JPEGs in an
+ * {@link MjpegEncoder} ring; the GPU encode queue is exercised only during
+ * {@link #finalizeClip}, which burst-decodes the ring and re-encodes to an
+ * H.264 Annex B bitstream.
  */
 @Slf4j
 public class VulkanEncoder implements VideoEncoder, AutoCloseable
@@ -65,34 +53,34 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
     private final VulkanDevice vulkanDevice;
     private final VulkanCapabilities caps;
 
-    // Delegate to MjpegEncoder for continuous JPEG buffer recording
     private final MjpegEncoder jpegBuffer = new MjpegEncoder();
 
-    // Vulkan resources (created lazily on first finalizeClip)
+    // Destroyed once at shutdown.
+    private final Disposables persistent = new Disposables();
+
     private H264SessionConfig sessionConfig;
+    // Per-clip GPU resources; rebuilt on dimension change.
+    private EncodeResources resources;
+    private FrameEncoder frameEncoder;
+
     private long commandPool = VK_NULL_HANDLE;
-    private VkCommandBuffer commandBuffer;
-    private long encodeFence = VK_NULL_HANDLE;
+    private final VkCommandBuffer[] commandBuffers = new VkCommandBuffer[EncodeResources.RING_DEPTH];
+    private final long[] encodeFences = new long[EncodeResources.RING_DEPTH];
+    // Video-encode queue has no TRANSFER bit on AMD/NVIDIA/Intel, so the NV12
+    // upload runs on graphics and transfers ownership via QFOT.
+    private long gfxCommandPool = VK_NULL_HANDLE;
+    private final VkCommandBuffer[] gfxCommandBuffers = new VkCommandBuffer[EncodeResources.RING_DEPTH];
+    private final long[] uploadSemaphores = new long[EncodeResources.RING_DEPTH];
 
-    // Encode images and buffers (sized to last encode resolution)
-    private long encodeInputImage = VK_NULL_HANDLE;
-    private long encodeInputImageView = VK_NULL_HANDLE;
-    private long encodeInputMemory = VK_NULL_HANDLE;
-    private long dpbImage = VK_NULL_HANDLE;
-    private final long[] dpbImageViews = new long[2];
-    private long dpbMemory = VK_NULL_HANDLE;
-    private long bitstreamBuffer = VK_NULL_HANDLE;
-    private long bitstreamMemory = VK_NULL_HANDLE;
-    private long bitstreamMappedPtr = 0;
-    private long stagingBuffer = VK_NULL_HANDLE;
-    private long stagingMemory = VK_NULL_HANDLE;
-    private long stagingMappedPtr = 0;
-
-    private static final int BITSTREAM_BUFFER_SIZE = 4 * 1024 * 1024; // 4 MB per frame max
     private static final long FENCE_TIMEOUT_NS = 5_000_000_000L;
 
     private int encodedWidth = 0;
     private int encodedHeight = 0;
+    private int sourceWidth = 0;
+    private int sourceHeight = 0;
+    /** Source FPS from {@link #start(int, float)} or {@link #burstEncode(List, int)}.
+     *  Drives IDR period and rate control. {@code -1} if not set yet. */
+    private int sourceFps = -1;
     private boolean vulkanInitialized = false;
     private boolean closed = false;
 
@@ -105,9 +93,9 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
     @Override
     public void start(int fps, float quality)
     {
-        // Just start the JPEG buffer -- Vulkan resources are created lazily
+        if (fps <= 0) throw new IllegalArgumentException("fps must be positive, got " + fps);
+        this.sourceFps = fps;
         jpegBuffer.start(fps, quality);
-        log.debug("VulkanEncoder started at {} FPS (JPEG buffer active, GPU encode on clip)", fps);
     }
 
     @Override
@@ -121,45 +109,49 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
     @Override
     public void submitFrame(ByteBuffer rgbaPixels, int width, int height, long timestamp, boolean needsBlur)
     {
-        // Delegate to JPEG buffer -- zero GPU overhead during normal gameplay
         jpegBuffer.submitFrame(rgbaPixels, width, height, timestamp, needsBlur);
     }
 
     @Override
     public ClipData finalizeClip(long startTime, long endTime)
     {
-        // Step 1: Get JPEG frames from the circular buffer (handles blur)
-        ClipData mjpegClip = jpegBuffer.finalizeClip(startTime, endTime);
-        if (mjpegClip == null || mjpegClip.getFrames().isEmpty())
+        List<MjpegEncoder.TimestampedFrame> frames = jpegBuffer.snapshot(startTime, endTime);
+        if (frames.isEmpty())
         {
             return null;
         }
 
-        // Step 2: Burst-encode JPEGs to H.264 on the GPU
+        List<byte[]> jpegs = new ArrayList<>(frames.size());
+        long[] timestamps = new long[frames.size()];
+        for (int i = 0; i < frames.size(); i++)
+        {
+            jpegs.add(frames.get(i).jpeg);
+            timestamps[i] = frames.get(i).timestampMs;
+        }
+
         try
         {
-            byte[] h264Bitstream = burstEncode(mjpegClip.getFrames());
+            byte[] h264Bitstream = burstEncode(jpegs);
             if (h264Bitstream == null || h264Bitstream.length == 0)
             {
-                log.debug("Vulkan burst encode failed, falling back to MJPEG");
-                return mjpegClip;
+                log.warn("Vulkan burst encode returned empty, falling back to MJPEG");
+                return mjpegFallback(jpegs);
             }
-
-            log.debug("Burst encoded {} frames: {}MB MJPEG -> {}KB H.264",
-                mjpegClip.getFrames().size(),
-                mjpegClip.getTotalSize() / (1024 * 1024),
-                h264Bitstream.length / 1024);
-
-            return new ClipData(
-                Collections.singletonList(h264Bitstream),
-                "application/octet-stream",
-                h264Bitstream.length);
+            byte[] mp4 = LocalMp4Writer.toBytes(h264Bitstream, getDriverSpsPps(),
+                sourceWidth, sourceHeight, sourceFps, timestamps);
+            return new ClipData(Collections.singletonList(mp4), "video/mp4", mp4.length);
         }
         catch (Exception e)
         {
-            log.error("Vulkan burst encode failed, falling back to MJPEG", e);
-            return mjpegClip;
+            log.error("Vulkan burst encode threw, falling back to MJPEG", e);
+            return mjpegFallback(jpegs);
         }
+    }
+
+    private ClipData mjpegFallback(List<byte[]> jpegs)
+    {
+        long total = jpegs.stream().mapToLong(b -> b.length).sum();
+        return new ClipData(jpegs, "application/octet-stream", total);
     }
 
     @Override
@@ -174,37 +166,69 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
         return "vulkan-h264";
     }
 
-    // ---- Burst encode: JPEG frames -> H.264 bitstream ----
+    /**
+     * Returns the driver-emitted SPS+PPS NAL bodies from the current session,
+     * or {@code null} if no session exists yet. NAL bodies are returned
+     * without Annex B start codes; {@link AnnexBWriter#splitNalus} splits them.
+     */
+    byte[] getDriverSpsPps()
+    {
+        if (sessionConfig == null) return null;
+        return sessionConfig.fetchEncodedSpsPps(0, 0, true, true);
+    }
 
     /**
-     * Takes a list of JPEG byte arrays, decodes each to raw pixels,
-     * feeds them through the Vulkan H.264 encoder in sequence,
-     * and returns the complete H.264 Annex B bitstream.
+     * Burst-encode with an explicit source FPS, for callers that bypass
+     * {@link #start(int, float)} (e.g. the offline MJPEG-to-MP4 tool).
      */
-    private byte[] burstEncode(List<byte[]> jpegFrames)
+    byte[] burstEncode(List<byte[]> jpegFrames, int sourceFps)
     {
-        // Decode first frame to get dimensions
-        java.awt.image.BufferedImage firstFrame = decodeJpeg(jpegFrames.get(0));
-        if (firstFrame == null)
+        if (sourceFps <= 0) throw new IllegalArgumentException("sourceFps must be positive");
+        int prev = this.sourceFps;
+        this.sourceFps = sourceFps;
+        try
         {
-            return null;
+            return burstEncode(jpegFrames);
         }
+        finally
+        {
+            this.sourceFps = prev;
+        }
+    }
+
+    // Package-private so MjpegToMp4Tool can drive the encoder standalone.
+    byte[] burstEncode(List<byte[]> jpegFrames)
+    {
+        java.awt.image.BufferedImage firstFrame = decodeJpeg(jpegFrames.get(0));
+        if (firstFrame == null) return null;
 
         int width = firstFrame.getWidth();
         int height = firstFrame.getHeight();
+        sourceWidth = width;
+        sourceHeight = height;
 
-        // Initialize or reinitialize Vulkan resources if dimensions changed
-        if (!vulkanInitialized || width != encodedWidth || height != encodedHeight)
+        // NV12 + H.264 MB alignment require multiples of 16; SPS frame_cropping
+        // hides the padding at decode time.
+        int paddedWidth = (width + 15) & ~15;
+        int paddedHeight = (height + 15) & ~15;
+
+        if (!vulkanInitialized || paddedWidth != encodedWidth || paddedHeight != encodedHeight)
         {
             destroyEncodeResources();
-            initializeVulkan(width, height, jpegFrames.size());
-            encodedWidth = width;
-            encodedHeight = height;
+            initializeVulkan(paddedWidth, paddedHeight, jpegFrames.size());
+            encodedWidth = paddedWidth;
+            encodedHeight = paddedHeight;
         }
 
+        if (sourceFps <= 0)
+        {
+            throw new IllegalStateException(
+                "burstEncode called without a known source FPS; call start(fps, quality) first "
+                + "or use the burstEncode(frames, fps) overload.");
+        }
         ByteArrayOutputStream bitstreamOut = new ByteArrayOutputStream(jpegFrames.size() * 50000);
         int frameIndex = 0;
-        int fps = Math.max(jpegFrames.size() / 10, 20); // Estimate FPS from frame count
+        int fps = sourceFps;
 
         for (byte[] jpegBytes : jpegFrames)
         {
@@ -212,30 +236,33 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
                 ? firstFrame
                 : decodeJpeg(jpegBytes);
 
-            if (frame == null)
-            {
-                continue;
-            }
+            if (frame == null) continue;
 
             boolean isIdr = (frameIndex % fps) == 0;
-            byte[] encodedNalus = encodeOneFrame(frame, width, height, isIdr, frameIndex);
-
-            if (encodedNalus != null && encodedNalus.length > 0)
-            {
-                try
-                {
-                    bitstreamOut.write(encodedNalus);
-                }
-                catch (java.io.IOException e)
-                {
-                    log.error("Failed to write NALU data", e);
-                }
-            }
-
+            byte[] prev = frameEncoder.encodeFrame(frame, width, height, isIdr, frameIndex);
+            writeNalus(bitstreamOut, prev);
             frameIndex++;
         }
 
+        for (byte[] tail : frameEncoder.drainRemaining())
+        {
+            writeNalus(bitstreamOut, tail);
+        }
+
         return bitstreamOut.toByteArray();
+    }
+
+    private void writeNalus(ByteArrayOutputStream out, byte[] nalus)
+    {
+        if (nalus == null || nalus.length == 0) return;
+        try
+        {
+            out.write(nalus);
+        }
+        catch (java.io.IOException e)
+        {
+            log.error("Failed to write NALU data", e);
+        }
     }
 
     private java.awt.image.BufferedImage decodeJpeg(byte[] jpegBytes)
@@ -251,300 +278,6 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
         }
     }
 
-    /**
-     * Encodes a single frame to H.264 using the Vulkan hardware encoder.
-     * Returns the Annex B NALUs for this frame.
-     */
-    private byte[] encodeOneFrame(java.awt.image.BufferedImage frame, int width, int height,
-                                  boolean isIdr, int frameIndex)
-    {
-        VkDevice device = vulkanDevice.getDevice();
-
-        // Extract RGB pixels and upload to staging buffer
-        int[] rgbPixels = frame.getRGB(0, 0, width, height, null, 0, width);
-        ByteBuffer staging = memByteBuffer(stagingMappedPtr, width * height * 4);
-        staging.clear();
-        for (int pixel : rgbPixels)
-        {
-            staging.put((byte) ((pixel >> 16) & 0xFF)); // R
-            staging.put((byte) ((pixel >> 8) & 0xFF));  // G
-            staging.put((byte) (pixel & 0xFF));          // B
-            staging.put((byte) 0xFF);                    // A
-        }
-        staging.flip();
-
-        try (MemoryStack stack = stackPush())
-        {
-            vkWaitForFences(device, encodeFence, true, FENCE_TIMEOUT_NS);
-            vkResetFences(device, encodeFence);
-            vkResetCommandPool(device, commandPool, 0);
-
-            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
-                .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-            vkBeginCommandBuffer(commandBuffer, beginInfo);
-
-            // Transition encode input: UNDEFINED -> TRANSFER_DST
-            imageBarrier2(stack, encodeInputImage,
-                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0);
-
-            // Copy staging -> encode input
-            VkBufferImageCopy.Buffer copyRegion = VkBufferImageCopy.calloc(1, stack)
-                .bufferOffset(0)
-                .bufferRowLength(0)
-                .bufferImageHeight(0)
-                .imageSubresource(s -> s
-                    .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-                    .mipLevel(0)
-                    .baseArrayLayer(0)
-                    .layerCount(1))
-                .imageOffset(o -> o.set(0, 0, 0))
-                .imageExtent(e -> e.set(width, height, 1));
-
-            vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, encodeInputImage,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, copyRegion);
-
-            // Transition encode input: TRANSFER_DST -> VIDEO_ENCODE_SRC
-            imageBarrier2(stack, encodeInputImage,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_VIDEO_ENCODE_SRC_KHR,
-                VK_ACCESS_TRANSFER_WRITE_BIT, 0,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                0,
-                VK_ACCESS_2_VIDEO_ENCODE_READ_BIT_KHR,
-                VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR);
-
-            int dpbSlot = frameIndex % 2;
-            int refSlot = (frameIndex + 1) % 2;
-
-            recordEncodeCommand(stack, isIdr, dpbSlot, refSlot, frameIndex);
-
-            // Barrier: bitstream -> host readable
-            bufferBarrier2(stack, bitstreamBuffer,
-                VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR, VK_ACCESS_HOST_READ_BIT,
-                VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR, VK_PIPELINE_STAGE_HOST_BIT);
-
-            vkEndCommandBuffer(commandBuffer);
-
-            // Submit and wait
-            VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO)
-                .pCommandBuffers(stack.pointers(commandBuffer));
-
-            int result = vkQueueSubmit(vulkanDevice.getVideoEncodeQueue(), submitInfo, encodeFence);
-            if (result != VK_SUCCESS)
-            {
-                log.error("vkQueueSubmit failed: {}", result);
-                return null;
-            }
-
-            vkWaitForFences(device, encodeFence, true, FENCE_TIMEOUT_NS);
-
-            // Invalidate CPU cache for HOST_CACHED memory
-            VkMappedMemoryRange range = VkMappedMemoryRange.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE)
-                .memory(bitstreamMemory)
-                .offset(0)
-                .size(VK_WHOLE_SIZE);
-            vkInvalidateMappedMemoryRanges(device, range);
-
-            // Read back bitstream
-            ByteBuffer bitstream = memByteBuffer(bitstreamMappedPtr, BITSTREAM_BUFFER_SIZE);
-            int dataEnd = findBitstreamEnd(bitstream);
-            if (dataEnd <= 0)
-            {
-                return null;
-            }
-
-            byte[] naluData = new byte[dataEnd];
-            bitstream.rewind();
-            bitstream.get(naluData, 0, dataEnd);
-            return naluData;
-        }
-    }
-
-    private void recordEncodeCommand(MemoryStack stack, boolean isIdr, int dpbSlot, int refSlot,
-                                     int frameIndex)
-    {
-        // Transition DPB images on first frame
-        if (frameIndex == 0)
-        {
-            for (int i = 0; i < 2; i++)
-            {
-                imageBarrier2(stack, dpbImage,
-                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_VIDEO_ENCODE_DPB_KHR,
-                    0, 0,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
-                    i,
-                    VK_ACCESS_2_VIDEO_ENCODE_READ_BIT_KHR | VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR,
-                    VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR);
-            }
-        }
-
-        // Source picture
-        VkVideoPictureResourceInfoKHR srcPicture = VkVideoPictureResourceInfoKHR.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR)
-            .codedOffset(o -> o.set(0, 0))
-            .codedExtent(e -> e.set(encodedWidth, encodedHeight))
-            .baseArrayLayer(0)
-            .imageViewBinding(encodeInputImageView);
-
-        // Setup slot (reconstructed picture)
-        VkVideoEncodeH264DpbSlotInfoEXT h264DpbSlotInfo = VkVideoEncodeH264DpbSlotInfoEXT.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_DPB_SLOT_INFO_EXT);
-
-        VkVideoPictureResourceInfoKHR setupPicResource = VkVideoPictureResourceInfoKHR.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR)
-            .codedOffset(o -> o.set(0, 0))
-            .codedExtent(e -> e.set(encodedWidth, encodedHeight))
-            .baseArrayLayer(dpbSlot)
-            .imageViewBinding(dpbImageViews[dpbSlot]);
-
-        VkVideoReferenceSlotInfoKHR setupSlot = VkVideoReferenceSlotInfoKHR.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR)
-            .pNext(h264DpbSlotInfo.address())
-            .slotIndex(dpbSlot)
-            .pPictureResource(setupPicResource);
-
-        // Reference slots for P-frames
-        VkVideoReferenceSlotInfoKHR.Buffer referenceSlots = null;
-        if (!isIdr && frameIndex > 0)
-        {
-            VkVideoEncodeH264DpbSlotInfoEXT refH264Info = VkVideoEncodeH264DpbSlotInfoEXT.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_DPB_SLOT_INFO_EXT);
-
-            VkVideoPictureResourceInfoKHR refPicResource = VkVideoPictureResourceInfoKHR.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR)
-                .codedOffset(o -> o.set(0, 0))
-                .codedExtent(e -> e.set(encodedWidth, encodedHeight))
-                .baseArrayLayer(refSlot)
-                .imageViewBinding(dpbImageViews[refSlot]);
-
-            referenceSlots = VkVideoReferenceSlotInfoKHR.calloc(1, stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR)
-                .pNext(refH264Info.address())
-                .slotIndex(refSlot)
-                .pPictureResource(refPicResource);
-        }
-
-        // H.264 picture info
-        StdVideoEncodeH264PictureInfoFlags picFlags = StdVideoEncodeH264PictureInfoFlags.calloc(stack)
-            .idr_flag(isIdr)
-            .is_reference_flag(true);
-
-        StdVideoEncodeH264PictureInfo picInfo = StdVideoEncodeH264PictureInfo.calloc(stack)
-            .flags(picFlags)
-            .seq_parameter_set_id((byte) 0)
-            .pic_parameter_set_id((byte) 0)
-            .pictureType(isIdr ? STD_VIDEO_H264_PICTURE_TYPE_IDR : STD_VIDEO_H264_PICTURE_TYPE_P)
-            .frame_num(frameIndex % 16);
-
-        // Reference lists
-        StdVideoEncodeH264ReferenceListsInfo refLists = StdVideoEncodeH264ReferenceListsInfo.calloc(stack);
-        if (!isIdr && frameIndex > 0)
-        {
-            ByteBuffer l0Entries = stack.bytes((byte) refSlot);
-            StdVideoEncodeH264ReferenceListsInfo.nrefPicList0EntryCount(refLists.address(), (byte) 1);
-            refLists.pRefPicList0Entries(l0Entries);
-        }
-
-        // Slice info
-        StdVideoEncodeH264SliceHeaderFlags sliceFlags = StdVideoEncodeH264SliceHeaderFlags.calloc(stack);
-        StdVideoEncodeH264SliceHeader sliceHeader = StdVideoEncodeH264SliceHeader.calloc(stack)
-            .flags(sliceFlags)
-            .slice_type(isIdr ? STD_VIDEO_H264_SLICE_TYPE_I : STD_VIDEO_H264_SLICE_TYPE_P);
-
-        VkVideoEncodeH264NaluSliceInfoEXT.Buffer naluSliceInfo =
-            VkVideoEncodeH264NaluSliceInfoEXT.calloc(1, stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_EXT)
-                .mbCount(((encodedWidth + 15) / 16) * ((encodedHeight + 15) / 16))
-                .pStdReferenceFinalLists(refLists)
-                .pStdSliceHeader(sliceHeader);
-
-        VkVideoEncodeH264VclFrameInfoEXT h264FrameInfo = VkVideoEncodeH264VclFrameInfoEXT.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_VCL_FRAME_INFO_EXT)
-            .pStdReferenceFinalLists(refLists)
-            .pNaluSliceEntries(naluSliceInfo)
-            .pStdPictureInfo(picInfo);
-
-        // Begin video coding
-        VkVideoBeginCodingInfoKHR beginCoding = VkVideoBeginCodingInfoKHR.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR)
-            .videoSession(sessionConfig.getVideoSession())
-            .videoSessionParameters(sessionConfig.getSessionParameters());
-
-        VkVideoReferenceSlotInfoKHR.Buffer beginSlots = VkVideoReferenceSlotInfoKHR.calloc(2, stack);
-        for (int i = 0; i < 2; i++)
-        {
-            final int layer = i;
-            VkVideoPictureResourceInfoKHR slotPic = VkVideoPictureResourceInfoKHR.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR)
-                .codedOffset(o -> o.set(0, 0))
-                .codedExtent(e -> e.set(encodedWidth, encodedHeight))
-                .baseArrayLayer(layer)
-                .imageViewBinding(dpbImageViews[layer]);
-
-            beginSlots.get(i)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR)
-                .slotIndex(i)
-                .pPictureResource(slotPic);
-        }
-        beginCoding.pReferenceSlots(beginSlots);
-
-        vkCmdBeginVideoCodingKHR(commandBuffer, beginCoding);
-
-        // Reset session on first frame of each burst
-        if (frameIndex == 0)
-        {
-            VkVideoCodingControlInfoKHR controlInfo = VkVideoCodingControlInfoKHR.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR)
-                .flags(VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR);
-            vkCmdControlVideoCodingKHR(commandBuffer, controlInfo);
-        }
-
-        // Encode
-        VkVideoEncodeInfoKHR encodeInfo = VkVideoEncodeInfoKHR.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_INFO_KHR)
-            .pNext(h264FrameInfo.address())
-            .dstBuffer(bitstreamBuffer)
-            .dstBufferOffset(0)
-            .dstBufferRange(BITSTREAM_BUFFER_SIZE)
-            .srcPictureResource(srcPicture)
-            .pSetupReferenceSlot(setupSlot)
-            .pReferenceSlots(referenceSlots);
-
-        vkCmdEncodeVideoKHR(commandBuffer, encodeInfo);
-
-        // End video coding
-        VkVideoEndCodingInfoKHR endCoding = VkVideoEndCodingInfoKHR.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR);
-        vkCmdEndVideoCodingKHR(commandBuffer, endCoding);
-    }
-
-    private int findBitstreamEnd(ByteBuffer buffer)
-    {
-        buffer.rewind();
-        int lastNonZero = 0;
-
-        for (int i = 0; i < buffer.remaining(); i++)
-        {
-            if (buffer.get(i) != 0)
-            {
-                lastNonZero = i + 1;
-            }
-            if (i - lastNonZero > 64)
-            {
-                break;
-            }
-        }
-
-        return lastNonZero;
-    }
-
-    // ---- Vulkan resource lifecycle (lazy init) ----
-
     private void initializeVulkan(int width, int height, int frameCount)
     {
         if (!vulkanInitialized)
@@ -554,513 +287,153 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
             vulkanInitialized = true;
         }
 
-        int fps = Math.max(frameCount / 10, 20);
+        int fps = sourceFps > 0 ? sourceFps : 30;
         sessionConfig = new H264SessionConfig(vulkanDevice, caps, width, height, fps);
         sessionConfig.initialize();
 
-        createEncodeInputImage(width, height);
-        createDpbImages(width, height);
-        createBitstreamBuffer();
-        createStagingBuffer(width, height);
+        resources = new EncodeResources(vulkanDevice, caps, width, height);
         allocateCommandBuffer();
+
+        frameEncoder = new FrameEncoder(
+            vulkanDevice, caps, sessionConfig, resources,
+            commandBuffers, gfxCommandBuffers,
+            encodeFences, uploadSemaphores,
+            width, height, fps);
     }
 
     private void createCommandPool()
     {
+        VkDevice device = vulkanDevice.getDevice();
         try (MemoryStack stack = stackPush())
         {
-            VkCommandPoolCreateInfo poolInfo = VkCommandPoolCreateInfo.calloc(stack)
+            // Encode-queue pool. RESET_COMMAND_BUFFER_BIT so ring slots can
+            // be reset individually; pool-wide reset would clobber pending work.
+            VkCommandPoolCreateInfo encPool = VkCommandPoolCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
-                .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
+                .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT
+                    | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
                 .queueFamilyIndex(vulkanDevice.getVideoEncodeQueueFamily());
-
             LongBuffer pPool = stack.mallocLong(1);
-            int result = vkCreateCommandPool(vulkanDevice.getDevice(), poolInfo, null, pPool);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkCreateCommandPool failed: " + result);
-            }
+            int r = vkCreateCommandPool(device, encPool, null, pPool);
+            if (r != VK_SUCCESS) throw new RuntimeException("encode vkCreateCommandPool failed: " + r);
             commandPool = pPool.get(0);
+            persistent.add(() -> vkDestroyCommandPool(device, commandPool, null));
+
+            // Graphics-queue pool (for the NV12 upload).
+            VkCommandPoolCreateInfo gfxPool = VkCommandPoolCreateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+                .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT
+                    | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
+                .queueFamilyIndex(vulkanDevice.getGraphicsQueueFamily());
+            r = vkCreateCommandPool(device, gfxPool, null, pPool);
+            if (r != VK_SUCCESS) throw new RuntimeException("graphics vkCreateCommandPool failed: " + r);
+            gfxCommandPool = pPool.get(0);
+            persistent.add(() -> vkDestroyCommandPool(device, gfxCommandPool, null));
         }
     }
 
     private void allocateCommandBuffer()
     {
+        VkDevice device = vulkanDevice.getDevice();
         try (MemoryStack stack = stackPush())
         {
-            VkCommandBufferAllocateInfo allocInfo = VkCommandBufferAllocateInfo.calloc(stack)
+            VkCommandBufferAllocateInfo encAlloc = VkCommandBufferAllocateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
                 .commandPool(commandPool)
                 .level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-                .commandBufferCount(1);
-
-            PointerBuffer pCmdBuf = stack.mallocPointer(1);
-            int result = vkAllocateCommandBuffers(vulkanDevice.getDevice(), allocInfo, pCmdBuf);
-            if (result != VK_SUCCESS)
+                .commandBufferCount(EncodeResources.RING_DEPTH);
+            PointerBuffer pCmdBuf = stack.mallocPointer(EncodeResources.RING_DEPTH);
+            int r = vkAllocateCommandBuffers(device, encAlloc, pCmdBuf);
+            if (r != VK_SUCCESS) throw new RuntimeException("encode vkAllocateCommandBuffers failed: " + r);
+            for (int i = 0; i < EncodeResources.RING_DEPTH; i++)
             {
-                throw new RuntimeException("vkAllocateCommandBuffers failed: " + result);
+                commandBuffers[i] = new VkCommandBuffer(pCmdBuf.get(i), device);
             }
-            commandBuffer = new VkCommandBuffer(pCmdBuf.get(0), vulkanDevice.getDevice());
+
+            VkCommandBufferAllocateInfo gfxAlloc = VkCommandBufferAllocateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+                .commandPool(gfxCommandPool)
+                .level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+                .commandBufferCount(EncodeResources.RING_DEPTH);
+            pCmdBuf.clear();
+            r = vkAllocateCommandBuffers(device, gfxAlloc, pCmdBuf);
+            if (r != VK_SUCCESS) throw new RuntimeException("graphics vkAllocateCommandBuffers failed: " + r);
+            for (int i = 0; i < EncodeResources.RING_DEPTH; i++)
+            {
+                gfxCommandBuffers[i] = new VkCommandBuffer(pCmdBuf.get(i), device);
+            }
         }
     }
 
     private void createSyncPrimitives()
     {
+        VkDevice device = vulkanDevice.getDevice();
         try (MemoryStack stack = stackPush())
         {
             VkFenceCreateInfo fenceInfo = VkFenceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
                 .flags(VK_FENCE_CREATE_SIGNALED_BIT);
-
-            LongBuffer pFence = stack.mallocLong(1);
-            int result = vkCreateFence(vulkanDevice.getDevice(), fenceInfo, null, pFence);
-            if (result != VK_SUCCESS)
+            VkSemaphoreCreateInfo semInfo = VkSemaphoreCreateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO);
+            LongBuffer p = stack.mallocLong(1);
+            for (int i = 0; i < EncodeResources.RING_DEPTH; i++)
             {
-                throw new RuntimeException("vkCreateFence failed: " + result);
-            }
-            encodeFence = pFence.get(0);
-        }
-    }
+                int r = vkCreateFence(device, fenceInfo, null, p);
+                if (r != VK_SUCCESS) throw new RuntimeException("vkCreateFence slot " + i + " failed: " + r);
+                encodeFences[i] = p.get(0);
+                final int slot = i;
+                persistent.add(() -> vkDestroyFence(device, encodeFences[slot], null));
 
-    private void createEncodeInputImage(int width, int height)
-    {
-        VkDevice device = vulkanDevice.getDevice();
-
-        try (MemoryStack stack = stackPush())
-        {
-            VkVideoProfileListInfoKHR profileList = VkVideoProfileListInfoKHR.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR)
-                .pProfiles(VkVideoProfileInfoKHR.calloc(1, stack).put(0, caps.buildVideoProfile(stack)));
-
-            VkImageCreateInfo imageInfo = VkImageCreateInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
-                .pNext(profileList.address())
-                .imageType(VK_IMAGE_TYPE_2D)
-                .format(caps.getPictureFormat())
-                .extent(e -> e.set(width, height, 1))
-                .mipLevels(1)
-                .arrayLayers(1)
-                .samples(VK_SAMPLE_COUNT_1_BIT)
-                .tiling(VK_IMAGE_TILING_OPTIMAL)
-                .usage(VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
-                .sharingMode(VK_SHARING_MODE_EXCLUSIVE)
-                .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-
-            LongBuffer pImage = stack.mallocLong(1);
-            int result = vkCreateImage(device, imageInfo, null, pImage);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkCreateImage (encode input) failed: " + result);
-            }
-            encodeInputImage = pImage.get(0);
-
-            encodeInputMemory = allocateAndBindImageMemory(device, encodeInputImage,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
-
-            VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
-                .image(encodeInputImage)
-                .viewType(VK_IMAGE_VIEW_TYPE_2D)
-                .format(caps.getPictureFormat())
-                .subresourceRange(r -> r
-                    .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-                    .baseMipLevel(0)
-                    .levelCount(1)
-                    .baseArrayLayer(0)
-                    .layerCount(1));
-
-            LongBuffer pView = stack.mallocLong(1);
-            result = vkCreateImageView(device, viewInfo, null, pView);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkCreateImageView (encode input) failed: " + result);
-            }
-            encodeInputImageView = pView.get(0);
-        }
-    }
-
-    private void createDpbImages(int width, int height)
-    {
-        VkDevice device = vulkanDevice.getDevice();
-
-        try (MemoryStack stack = stackPush())
-        {
-            VkVideoProfileListInfoKHR profileList = VkVideoProfileListInfoKHR.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR)
-                .pProfiles(VkVideoProfileInfoKHR.calloc(1, stack).put(0, caps.buildVideoProfile(stack)));
-
-            VkImageCreateInfo imageInfo = VkImageCreateInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
-                .pNext(profileList.address())
-                .imageType(VK_IMAGE_TYPE_2D)
-                .format(caps.getPictureFormat())
-                .extent(e -> e.set(width, height, 1))
-                .mipLevels(1)
-                .arrayLayers(2)
-                .samples(VK_SAMPLE_COUNT_1_BIT)
-                .tiling(VK_IMAGE_TILING_OPTIMAL)
-                .usage(VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)
-                .sharingMode(VK_SHARING_MODE_EXCLUSIVE)
-                .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-
-            LongBuffer pImage = stack.mallocLong(1);
-            int result = vkCreateImage(device, imageInfo, null, pImage);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkCreateImage (DPB) failed: " + result);
-            }
-            dpbImage = pImage.get(0);
-
-            dpbMemory = allocateAndBindImageMemory(device, dpbImage,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
-
-            for (int i = 0; i < 2; i++)
-            {
-                final int layer = i;
-                VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
-                    .sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
-                    .image(dpbImage)
-                    .viewType(VK_IMAGE_VIEW_TYPE_2D)
-                    .format(caps.getPictureFormat())
-                    .subresourceRange(r -> r
-                        .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-                        .baseMipLevel(0)
-                        .levelCount(1)
-                        .baseArrayLayer(layer)
-                        .layerCount(1));
-
-                LongBuffer pView = stack.mallocLong(1);
-                result = vkCreateImageView(device, viewInfo, null, pView);
-                if (result != VK_SUCCESS)
-                {
-                    throw new RuntimeException("vkCreateImageView (DPB " + i + ") failed: " + result);
-                }
-                dpbImageViews[i] = pView.get(0);
+                // Binary semaphore signalled by the graphics submit (upload done),
+                // waited by the encode submit (QFOT acquire + encode).
+                r = vkCreateSemaphore(device, semInfo, null, p);
+                if (r != VK_SUCCESS) throw new RuntimeException("vkCreateSemaphore slot " + i + " failed: " + r);
+                uploadSemaphores[i] = p.get(0);
+                persistent.add(() -> vkDestroySemaphore(device, uploadSemaphores[slot], null));
             }
         }
     }
 
-    private void createBitstreamBuffer()
-    {
-        VkDevice device = vulkanDevice.getDevice();
-
-        try (MemoryStack stack = stackPush())
-        {
-            VkVideoProfileListInfoKHR profileList = VkVideoProfileListInfoKHR.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR)
-                .pProfiles(VkVideoProfileInfoKHR.calloc(1, stack).put(0, caps.buildVideoProfile(stack)));
-
-            VkBufferCreateInfo bufferInfo = VkBufferCreateInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
-                .pNext(profileList.address())
-                .size(BITSTREAM_BUFFER_SIZE)
-                .usage(VK_BUFFER_USAGE_VIDEO_ENCODE_DST_BIT_KHR)
-                .sharingMode(VK_SHARING_MODE_EXCLUSIVE);
-
-            LongBuffer pBuffer = stack.mallocLong(1);
-            int result = vkCreateBuffer(device, bufferInfo, null, pBuffer);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkCreateBuffer (bitstream) failed: " + result);
-            }
-            bitstreamBuffer = pBuffer.get(0);
-
-            bitstreamMemory = allocateAndBindBufferMemory(device, bitstreamBuffer,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, stack);
-
-            PointerBuffer pData = stack.mallocPointer(1);
-            result = vkMapMemory(device, bitstreamMemory, 0, BITSTREAM_BUFFER_SIZE, 0, pData);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkMapMemory (bitstream) failed: " + result);
-            }
-            bitstreamMappedPtr = pData.get(0);
-        }
-    }
-
-    private void createStagingBuffer(int width, int height)
-    {
-        VkDevice device = vulkanDevice.getDevice();
-        long bufferSize = (long) width * height * 4;
-
-        try (MemoryStack stack = stackPush())
-        {
-            VkBufferCreateInfo bufferInfo = VkBufferCreateInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
-                .size(bufferSize)
-                .usage(VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
-                .sharingMode(VK_SHARING_MODE_EXCLUSIVE);
-
-            LongBuffer pBuffer = stack.mallocLong(1);
-            int result = vkCreateBuffer(device, bufferInfo, null, pBuffer);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkCreateBuffer (staging) failed: " + result);
-            }
-            stagingBuffer = pBuffer.get(0);
-
-            stagingMemory = allocateAndBindBufferMemory(device, stagingBuffer,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stack);
-
-            PointerBuffer pData = stack.mallocPointer(1);
-            result = vkMapMemory(device, stagingMemory, 0, bufferSize, 0, pData);
-            if (result != VK_SUCCESS)
-            {
-                throw new RuntimeException("vkMapMemory (staging) failed: " + result);
-            }
-            stagingMappedPtr = pData.get(0);
-        }
-    }
-
-    // ---- Memory helpers ----
-
-    private long allocateAndBindImageMemory(VkDevice device, long image, int properties, MemoryStack stack)
-    {
-        VkMemoryRequirements memReqs = VkMemoryRequirements.calloc(stack);
-        vkGetImageMemoryRequirements(device, image, memReqs);
-
-        VkMemoryAllocateInfo allocInfo = VkMemoryAllocateInfo.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
-            .allocationSize(memReqs.size())
-            .memoryTypeIndex(findMemoryType(memReqs.memoryTypeBits(), properties, stack));
-
-        LongBuffer pMemory = stack.mallocLong(1);
-        int result = vkAllocateMemory(device, allocInfo, null, pMemory);
-        if (result != VK_SUCCESS)
-        {
-            throw new RuntimeException("vkAllocateMemory failed: " + result);
-        }
-        long memory = pMemory.get(0);
-        vkBindImageMemory(device, image, memory, 0);
-        return memory;
-    }
-
-    private long allocateAndBindBufferMemory(VkDevice device, long buffer, int properties, MemoryStack stack)
-    {
-        VkMemoryRequirements memReqs = VkMemoryRequirements.calloc(stack);
-        vkGetBufferMemoryRequirements(device, buffer, memReqs);
-
-        int memTypeIdx;
-        try
-        {
-            memTypeIdx = findMemoryType(memReqs.memoryTypeBits(), properties, stack);
-        }
-        catch (RuntimeException e)
-        {
-            memTypeIdx = findMemoryType(memReqs.memoryTypeBits(),
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, stack);
-        }
-
-        VkMemoryAllocateInfo allocInfo = VkMemoryAllocateInfo.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
-            .allocationSize(memReqs.size())
-            .memoryTypeIndex(memTypeIdx);
-
-        LongBuffer pMemory = stack.mallocLong(1);
-        int result = vkAllocateMemory(device, allocInfo, null, pMemory);
-        if (result != VK_SUCCESS)
-        {
-            throw new RuntimeException("vkAllocateMemory failed: " + result);
-        }
-        long memory = pMemory.get(0);
-        vkBindBufferMemory(device, buffer, memory, 0);
-        return memory;
-    }
-
-    private int findMemoryType(int typeFilter, int properties, MemoryStack stack)
-    {
-        VkPhysicalDeviceMemoryProperties memProps = VkPhysicalDeviceMemoryProperties.calloc(stack);
-        vkGetPhysicalDeviceMemoryProperties(vulkanDevice.getPhysicalDevice(), memProps);
-
-        for (int i = 0; i < memProps.memoryTypeCount(); i++)
-        {
-            if ((typeFilter & (1 << i)) != 0 &&
-                (memProps.memoryTypes(i).propertyFlags() & properties) == properties)
-            {
-                return i;
-            }
-        }
-
-        for (int i = 0; i < memProps.memoryTypeCount(); i++)
-        {
-            if ((typeFilter & (1 << i)) != 0)
-            {
-                return i;
-            }
-        }
-
-        throw new RuntimeException("Failed to find suitable memory type");
-    }
-
-    // ---- Barrier helpers (Synchronization2 / VK 1.3) ----
-
-    private void imageBarrier2(MemoryStack stack, long image,
-                               int oldLayout, int newLayout,
-                               int srcAccess, int dstAccess,
-                               int srcStage, int dstStage,
-                               int arrayLayer)
-    {
-        imageBarrier2(stack, image, oldLayout, newLayout,
-            srcAccess, dstAccess, srcStage, dstStage, arrayLayer, 0, 0);
-    }
-
-    private void imageBarrier2(MemoryStack stack, long image,
-                               int oldLayout, int newLayout,
-                               int srcAccess, int dstAccess,
-                               int srcStage, int dstStage,
-                               int arrayLayer,
-                               long dstAccess64, long dstStage64)
-    {
-        long finalDstAccess = dstAccess64 != 0 ? dstAccess64 : dstAccess;
-        long finalDstStage = dstStage64 != 0 ? dstStage64 : (dstStage != 0 ? dstStage : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
-        long finalSrcStage = srcStage != 0 ? srcStage : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-        VkImageMemoryBarrier2.Buffer barrier = VkImageMemoryBarrier2.calloc(1, stack)
-            .sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2)
-            .srcStageMask(finalSrcStage)
-            .srcAccessMask(srcAccess)
-            .dstStageMask(finalDstStage)
-            .dstAccessMask(finalDstAccess)
-            .oldLayout(oldLayout)
-            .newLayout(newLayout)
-            .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-            .dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-            .image(image)
-            .subresourceRange(r -> r
-                .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-                .baseMipLevel(0)
-                .levelCount(1)
-                .baseArrayLayer(arrayLayer)
-                .layerCount(1));
-
-        VkDependencyInfo depInfo = VkDependencyInfo.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_DEPENDENCY_INFO)
-            .pImageMemoryBarriers(barrier);
-
-        vkCmdPipelineBarrier2(commandBuffer, depInfo);
-    }
-
-    private void bufferBarrier2(MemoryStack stack, long buffer,
-                                long srcAccess, long dstAccess,
-                                long srcStage, long dstStage)
-    {
-        VkBufferMemoryBarrier2.Buffer barrier = VkBufferMemoryBarrier2.calloc(1, stack)
-            .sType(VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2)
-            .srcStageMask(srcStage)
-            .srcAccessMask(srcAccess)
-            .dstStageMask(dstStage)
-            .dstAccessMask(dstAccess)
-            .buffer(buffer)
-            .offset(0)
-            .size(BITSTREAM_BUFFER_SIZE);
-
-        VkDependencyInfo depInfo = VkDependencyInfo.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_DEPENDENCY_INFO)
-            .pBufferMemoryBarriers(barrier);
-
-        vkCmdPipelineBarrier2(commandBuffer, depInfo);
-    }
 
     // ---- Cleanup ----
 
     private void destroyEncodeResources()
     {
+        // Drain any in-flight ring slots before tearing down the resources
+        // they reference; validation layers fire on destroy-while-pending.
         VkDevice device = vulkanDevice.getDevice();
-
-        if (encodeFence != VK_NULL_HANDLE)
+        for (long fence : encodeFences)
         {
-            vkWaitForFences(device, encodeFence, true, FENCE_TIMEOUT_NS);
+            if (fence != VK_NULL_HANDLE)
+            {
+                vkWaitForFences(device, fence, true, FENCE_TIMEOUT_NS);
+            }
         }
 
+        frameEncoder = null;
+        if (resources != null)
+        {
+            resources.close();
+            resources = null;
+        }
         if (sessionConfig != null)
         {
             sessionConfig.close();
             sessionConfig = null;
-        }
-
-        if (encodeInputImageView != VK_NULL_HANDLE)
-        {
-            vkDestroyImageView(device, encodeInputImageView, null);
-            encodeInputImageView = VK_NULL_HANDLE;
-        }
-        if (encodeInputImage != VK_NULL_HANDLE)
-        {
-            vkDestroyImage(device, encodeInputImage, null);
-            encodeInputImage = VK_NULL_HANDLE;
-        }
-        if (encodeInputMemory != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(device, encodeInputMemory, null);
-            encodeInputMemory = VK_NULL_HANDLE;
-        }
-
-        for (int i = 0; i < 2; i++)
-        {
-            if (dpbImageViews[i] != VK_NULL_HANDLE)
-            {
-                vkDestroyImageView(device, dpbImageViews[i], null);
-                dpbImageViews[i] = VK_NULL_HANDLE;
-            }
-        }
-        if (dpbImage != VK_NULL_HANDLE)
-        {
-            vkDestroyImage(device, dpbImage, null);
-            dpbImage = VK_NULL_HANDLE;
-        }
-        if (dpbMemory != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(device, dpbMemory, null);
-            dpbMemory = VK_NULL_HANDLE;
-        }
-
-        if (bitstreamMappedPtr != 0)
-        {
-            vkUnmapMemory(device, bitstreamMemory);
-            bitstreamMappedPtr = 0;
-        }
-        if (bitstreamBuffer != VK_NULL_HANDLE)
-        {
-            vkDestroyBuffer(device, bitstreamBuffer, null);
-            bitstreamBuffer = VK_NULL_HANDLE;
-        }
-        if (bitstreamMemory != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(device, bitstreamMemory, null);
-            bitstreamMemory = VK_NULL_HANDLE;
-        }
-
-        if (stagingMappedPtr != 0)
-        {
-            vkUnmapMemory(device, stagingMemory);
-            stagingMappedPtr = 0;
-        }
-        if (stagingBuffer != VK_NULL_HANDLE)
-        {
-            vkDestroyBuffer(device, stagingBuffer, null);
-            stagingBuffer = VK_NULL_HANDLE;
-        }
-        if (stagingMemory != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(device, stagingMemory, null);
-            stagingMemory = VK_NULL_HANDLE;
         }
     }
 
     private void destroyVulkanResources()
     {
         destroyEncodeResources();
-
-        VkDevice device = vulkanDevice.getDevice();
-        if (encodeFence != VK_NULL_HANDLE)
+        persistent.close();
+        for (int i = 0; i < EncodeResources.RING_DEPTH; i++)
         {
-            vkDestroyFence(device, encodeFence, null);
-            encodeFence = VK_NULL_HANDLE;
+            encodeFences[i] = VK_NULL_HANDLE;
+            uploadSemaphores[i] = VK_NULL_HANDLE;
         }
-        if (commandPool != VK_NULL_HANDLE)
-        {
-            vkDestroyCommandPool(device, commandPool, null);
-            commandPool = VK_NULL_HANDLE;
-        }
+        commandPool = VK_NULL_HANDLE;
+        gfxCommandPool = VK_NULL_HANDLE;
         vulkanInitialized = false;
     }
 

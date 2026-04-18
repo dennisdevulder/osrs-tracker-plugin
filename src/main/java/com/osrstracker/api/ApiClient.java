@@ -93,10 +93,16 @@ public class ApiClient
         String apiUrl = OsrsTrackerConfig.getEffectiveApiUrl();
         String apiToken = config.apiToken();
 
-        // Validate configuration before attempting to send
         if (!isConfigurationValid())
         {
-            log.warn("API URL or token not configured, cannot send {}", eventDescription);
+            if (config.apiToken().isEmpty())
+            {
+                log.warn("API token not configured, skipping {}", eventDescription);
+            }
+            else
+            {
+                log.debug("Platform uploads disabled, skipping {}", eventDescription);
+            }
             return;
         }
 
@@ -178,6 +184,11 @@ public class ApiClient
     public boolean isConfigurationValid()
     {
         if (config.apiToken().isEmpty())
+        {
+            return false;
+        }
+
+        if (!config.uploadToPlatform())
         {
             return false;
         }

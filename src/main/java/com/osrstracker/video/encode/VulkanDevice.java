@@ -33,8 +33,9 @@ import java.nio.IntBuffer;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
-import static org.lwjgl.vulkan.EXTVideoEncodeH264.*;
+import static org.lwjgl.vulkan.KHRVideoEncodeH264.*;
 import static org.lwjgl.vulkan.KHRVideoEncodeQueue.*;
+import static org.lwjgl.vulkan.KHRVideoMaintenance1.*;
 import static org.lwjgl.vulkan.KHRVideoQueue.*;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK11.*;
@@ -52,13 +53,33 @@ public class VulkanDevice implements AutoCloseable
     private VkDevice device;
     private VkQueue videoEncodeQueue;
     private int videoEncodeQueueFamily = -1;
+    /**
+     * A queue family exposing GRAPHICS | COMPUTE | TRANSFER. Required because
+     * {@code vkCmdCopyBufferToImage} (used to upload the NV12 frame) is not a
+     * legal operation on a video-encode-only queue. Host-side frames upload
+     * here, then queue-family-ownership-transfer to the encode queue.
+     */
+    private VkQueue graphicsQueue;
+    private int graphicsQueueFamily = -1;
     private String deviceName = "unknown";
     private boolean closed = false;
 
     private static final String[] REQUIRED_DEVICE_EXTENSIONS = {
         VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
         VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME,
-        VK_EXT_VIDEO_ENCODE_H264_EXTENSION_NAME,
+        // VUID-vkCreateDevice-ppEnabledExtensionNames-01387: required
+        // transitively by video_encode_queue.
+        "VK_KHR_synchronization2",
+        // Drives correct DPB reference tracking across encode submissions.
+        "VK_KHR_video_maintenance1",
+        // H.264 encode was promoted EXT to KHR at ratification. LWJGL 3.3.2
+        // only exposes the EXT name; hasRequiredExtensions records which
+        // name the device advertises so createLogicalDevice enables it.
+    };
+
+    private static final String[] H264_ENCODE_EXTENSION_ALIASES = {
+        VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME,
+        "VK_EXT_video_encode_h264", // pre-ratification name, kept for old drivers
     };
 
     public void initialize()
@@ -110,7 +131,10 @@ public class VulkanDevice implements AutoCloseable
                 .applicationVersion(VK_MAKE_VERSION(1, 0, 0))
                 .pEngineName(stack.UTF8("osrs-tracker"))
                 .engineVersion(VK_MAKE_VERSION(1, 0, 0))
-                .apiVersion(VK_API_VERSION_1_1);
+                // 1.3 core exposes VkCmdPipelineBarrier2 and synchronization2
+                // directly; required by the video encode pipeline-barrier usage.
+                // VK_API_VERSION_1_3 isn't a constant in LWJGL 3.3.2; use the macro.
+                .apiVersion(VK_MAKE_API_VERSION(0, 1, 3, 0));
 
             // Only enable validation in dev mode
             boolean enableValidation = hasValidation &&
@@ -120,7 +144,6 @@ public class VulkanDevice implements AutoCloseable
             if (enableValidation)
             {
                 ppEnabledLayers = stack.pointers(stack.UTF8("VK_LAYER_KHRONOS_validation"));
-                log.debug("Vulkan validation layers enabled");
             }
 
             PointerBuffer ppEnabledExtensions = null;
@@ -142,8 +165,6 @@ public class VulkanDevice implements AutoCloseable
                 throw new RuntimeException("vkCreateInstance failed: " + result);
             }
             instance = new VkInstance(pInstance.get(0), createInfo);
-
-            log.debug("Vulkan instance created");
         }
     }
 
@@ -166,6 +187,7 @@ public class VulkanDevice implements AutoCloseable
             VkPhysicalDevice bestDevice = null;
             int bestScore = -1;
             int bestQueueFamily = -1;
+            int bestGraphicsFamily = -1;
             String bestName = "unknown";
 
             for (int i = 0; i < deviceCount; i++)
@@ -187,44 +209,45 @@ public class VulkanDevice implements AutoCloseable
                     score = 100;
                 }
 
-                int encodeFamily = findVideoEncodeQueueFamily(candidate, stack);
-                if (encodeFamily < 0)
+                int encodeFamily = findQueueFamily(candidate, VK_QUEUE_VIDEO_ENCODE_BIT_KHR, stack);
+                int gfxFamily = findQueueFamily(candidate,
+                    VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT, stack);
+                if (encodeFamily < 0 || gfxFamily < 0)
                 {
-                    log.debug("  {} -- no video encode queue, skipping", name);
                     continue;
                 }
-
                 if (!hasRequiredExtensions(candidate, stack))
                 {
-                    log.debug("  {} -- missing required extensions, skipping", name);
                     continue;
                 }
-
-                log.debug("  {} -- score={}, encodeQueue={}", name, score, encodeFamily);
 
                 if (score > bestScore)
                 {
                     bestScore = score;
                     bestDevice = candidate;
                     bestQueueFamily = encodeFamily;
+                    bestGraphicsFamily = gfxFamily;
                     bestName = name;
                 }
             }
 
             if (bestDevice == null)
             {
-                throw new RuntimeException("No GPU with Vulkan Video Encode support found");
+                throw new RuntimeException("No GPU with Vulkan Video Encode + graphics support found");
             }
 
             physicalDevice = bestDevice;
             videoEncodeQueueFamily = bestQueueFamily;
+            graphicsQueueFamily = bestGraphicsFamily;
             deviceName = bestName;
-
-            log.debug("Selected GPU: {}", deviceName);
         }
     }
 
-    private int findVideoEncodeQueueFamily(VkPhysicalDevice device, MemoryStack stack)
+    /**
+     * Returns the index of the first queue family whose flags contain ALL bits in
+     * {@code requiredFlags}, or -1 if none.
+     */
+    private int findQueueFamily(VkPhysicalDevice device, int requiredFlags, MemoryStack stack)
     {
         IntBuffer pCount = stack.mallocInt(1);
         vkGetPhysicalDeviceQueueFamilyProperties(device, pCount, null);
@@ -235,13 +258,21 @@ public class VulkanDevice implements AutoCloseable
 
         for (int i = 0; i < count; i++)
         {
-            if ((families.get(i).queueFlags() & VK_QUEUE_VIDEO_ENCODE_BIT_KHR) != 0)
+            if ((families.get(i).queueFlags() & requiredFlags) == requiredFlags)
             {
                 return i;
             }
         }
         return -1;
     }
+
+    /**
+     * Name of the H.264 encode extension this device advertises (KHR or EXT),
+     * captured during selection so createLogicalDevice enables the correct string.
+     */
+    private String h264EncodeExtensionName;
+
+    String getH264EncodeExtensionName() { return h264EncodeExtensionName; }
 
     private boolean hasRequiredExtensions(VkPhysicalDevice device, MemoryStack stack)
     {
@@ -250,43 +281,80 @@ public class VulkanDevice implements AutoCloseable
         VkExtensionProperties.Buffer exts = VkExtensionProperties.calloc(pExtCount.get(0), stack);
         vkEnumerateDeviceExtensionProperties(device, (String) null, pExtCount, exts);
 
+        java.util.Set<String> available = new java.util.HashSet<>();
+        for (int i = 0; i < exts.capacity(); i++)
+        {
+            available.add(exts.get(i).extensionNameString());
+        }
+
         for (String required : REQUIRED_DEVICE_EXTENSIONS)
         {
-            boolean found = false;
-            for (int i = 0; i < exts.capacity(); i++)
-            {
-                if (required.equals(exts.get(i).extensionNameString()))
-                {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found)
+            if (!available.contains(required))
             {
                 return false;
             }
         }
-        return true;
+        for (String alias : H264_ENCODE_EXTENSION_ALIASES)
+        {
+            if (available.contains(alias))
+            {
+                h264EncodeExtensionName = alias;
+                return true;
+            }
+        }
+        return false;
     }
 
     private void createLogicalDevice()
     {
         try (MemoryStack stack = stackPush())
         {
-            VkDeviceQueueCreateInfo.Buffer queueCreateInfos = VkDeviceQueueCreateInfo.calloc(1, stack)
+            // Two queues: graphics (for upload) + video encode. If both landed in
+            // the same family (rare on AMD, possible on some integrated parts), we
+            // only need one VkDeviceQueueCreateInfo.
+            boolean sharedFamily = graphicsQueueFamily == videoEncodeQueueFamily;
+            VkDeviceQueueCreateInfo.Buffer queueCreateInfos =
+                VkDeviceQueueCreateInfo.calloc(sharedFamily ? 1 : 2, stack);
+            queueCreateInfos.get(0)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO)
                 .queueFamilyIndex(videoEncodeQueueFamily)
                 .pQueuePriorities(stack.floats(1.0f));
+            if (!sharedFamily)
+            {
+                queueCreateInfos.get(1)
+                    .sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO)
+                    .queueFamilyIndex(graphicsQueueFamily)
+                    .pQueuePriorities(stack.floats(1.0f));
+            }
 
-            PointerBuffer ppExtensions = stack.mallocPointer(REQUIRED_DEVICE_EXTENSIONS.length);
+            PointerBuffer ppExtensions = stack.mallocPointer(REQUIRED_DEVICE_EXTENSIONS.length + 1);
             for (String ext : REQUIRED_DEVICE_EXTENSIONS)
             {
                 ppExtensions.put(stack.UTF8(ext));
             }
+            ppExtensions.put(stack.UTF8(h264EncodeExtensionName));
             ppExtensions.flip();
+
+            // Enable synchronization2 feature at device creation. Required by
+            // the VK13 vkCmdPipelineBarrier2 calls in the encode pipeline;
+            // enabling just the extension isn't enough, the feature bit matters.
+            VkPhysicalDeviceSynchronization2Features sync2Features =
+                VkPhysicalDeviceSynchronization2Features.calloc(stack)
+                    .sType$Default()
+                    .synchronization2(true);
+
+            // Enable videoMaintenance1: spec requires the feature bit be set to
+            // use the extension's session-create flags. Enabling just the extension
+            // gives the layout-transition fixes but not inline queries.
+            VkPhysicalDeviceVideoMaintenance1FeaturesKHR videoMaint1Features =
+                VkPhysicalDeviceVideoMaintenance1FeaturesKHR.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_MAINTENANCE_1_FEATURES_KHR)
+                    .pNext(sync2Features.address())
+                    .videoMaintenance1(true);
 
             VkDeviceCreateInfo deviceCreateInfo = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
+                .pNext(videoMaint1Features.address())
                 .pQueueCreateInfos(queueCreateInfos)
                 .ppEnabledExtensionNames(ppExtensions);
 
@@ -302,7 +370,9 @@ public class VulkanDevice implements AutoCloseable
             vkGetDeviceQueue(device, videoEncodeQueueFamily, 0, pQueue);
             videoEncodeQueue = new VkQueue(pQueue.get(0), device);
 
-            log.debug("Vulkan device created, encode queue acquired");
+            PointerBuffer pGfxQueue = stack.mallocPointer(1);
+            vkGetDeviceQueue(device, graphicsQueueFamily, 0, pGfxQueue);
+            graphicsQueue = new VkQueue(pGfxQueue.get(0), device);
         }
     }
 
@@ -311,6 +381,8 @@ public class VulkanDevice implements AutoCloseable
     public VkDevice getDevice() { return device; }
     public VkQueue getVideoEncodeQueue() { return videoEncodeQueue; }
     public int getVideoEncodeQueueFamily() { return videoEncodeQueueFamily; }
+    public VkQueue getGraphicsQueue() { return graphicsQueue; }
+    public int getGraphicsQueueFamily() { return graphicsQueueFamily; }
     public String getDeviceName() { return deviceName; }
 
     @Override
@@ -335,7 +407,5 @@ public class VulkanDevice implements AutoCloseable
         {
             vkDestroyInstance(instance, null);
         }
-
-        log.debug("Vulkan device closed");
     }
 }

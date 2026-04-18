@@ -79,6 +79,12 @@ public class AsyncFrameCapture
     // to prevent drift when game FPS doesn't evenly divide capture FPS
     private long nextCaptureTimeNs = 0;
 
+    // Plugin startUp() registers this listener before RuneLite's GPU plugin has
+    // a GL context on the render thread. Allow a grace window of missed frames
+    // before declaring GL unavailable.
+    private static final int GL_GRACE_FRAMES = 600;
+    private int glMissedFrames = 0;
+
     /**
      * @param drawManager The RuneLite DrawManager for frame listeners
      * @param recorder The VideoRecorder to submit encoded frames to
@@ -108,6 +114,7 @@ public class AsyncFrameCapture
         firstFrame = true;
         pboIndex = 0;
         nextCaptureTimeNs = 0;
+        glMissedFrames = 0;
 
         everyFrameListener = this::onFrame;
         drawManager.registerEveryFrameListener(everyFrameListener);
@@ -203,19 +210,27 @@ public class AsyncFrameCapture
             }
             catch (IllegalStateException e)
             {
-                pboUnsupported = true;
-                log.debug("No OpenGL context available, triggering fallback");
-                onPboUnsupported.run();
+                if (++glMissedFrames > GL_GRACE_FRAMES)
+                {
+                    pboUnsupported = true;
+                    log.debug("No OpenGL context after {} frames, triggering fallback", glMissedFrames);
+                    onPboUnsupported.run();
+                }
                 return;
             }
 
             if (caps == null || !caps.OpenGL21)
             {
-                pboUnsupported = true;
-                log.debug("OpenGL 2.1 not available, triggering fallback");
-                onPboUnsupported.run();
+                if (++glMissedFrames > GL_GRACE_FRAMES)
+                {
+                    pboUnsupported = true;
+                    log.debug("OpenGL 2.1 unavailable after {} frames, triggering fallback", glMissedFrames);
+                    onPboUnsupported.run();
+                }
                 return;
             }
+
+            glMissedFrames = 0;
 
             int width, height;
             try (MemoryStack stack = MemoryStack.stackPush())

@@ -27,6 +27,7 @@ package com.osrstracker.collectionlog;
 import com.google.gson.JsonObject;
 import com.osrstracker.OsrsTrackerConfig;
 import com.osrstracker.api.ApiClient;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 
@@ -106,7 +107,6 @@ public class CollectionLogTracker
      */
     private void sendCollectionLogUpdateToApi(String itemName)
     {
-        // Capture video with the collection log event
         videoRecorder.captureEventVideo((screenshotBase64, videoBase64) -> {
             JsonObject payload = new JsonObject();
             payload.addProperty("item_name", itemName);
@@ -119,6 +119,6 @@ public class CollectionLogTracker
                 screenshotBase64,
                 videoBase64
             );
-        });
+        }, EventKind.COLLECTION_LOG, itemName);
     }
 }

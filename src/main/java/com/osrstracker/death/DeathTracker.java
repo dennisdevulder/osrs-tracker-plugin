@@ -30,6 +30,7 @@ import net.runelite.api.Client;
 import net.runelite.api.Player;
 import com.osrstracker.OsrsTrackerConfig;
 import com.osrstracker.api.ApiClient;
+import com.osrstracker.video.EventKind;
 import com.osrstracker.video.VideoRecorder;
 import lombok.extern.slf4j.Slf4j;
 
@@ -90,7 +91,9 @@ public class DeathTracker
                 );
             },
             null,
-            DEATH_POST_EVENT_MS
+            DEATH_POST_EVENT_MS,
+            EventKind.DEATH,
+            "death"
         );
     }
 }
