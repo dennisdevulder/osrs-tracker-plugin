@@ -48,8 +48,15 @@ import static org.lwjgl.vulkan.VK10.*;
  * JPEG roundtrip the burst-encode path takes; quality is bounded by H.264
  * rather than by JPEG re-compression.
  *
- * Single segment for now: differently-sized frames mid-recording are dropped.
- * Resize handling (multiple segments per ring) lands in a follow-up.
+ * Resize handling: shrinking resizes (sidebar open, dialog popups) pad into
+ * the existing coded extent so the pre-roll buffer survives. Growing resizes
+ * tear down the session and open a new segment; finalize then picks the
+ * latest segment overlapping the requested window. Frames spanning a
+ * growing resize are dropped from the clip — the alternative (multi-segment
+ * MP4) is poorly supported by common players.
+ *
+ * Thread-safety: public methods are {@code synchronized} on {@code this}.
+ * Concurrent {@code submitFrame} calls from the writer pool serialise.
  */
 @Slf4j
 public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
@@ -144,6 +151,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     {
         if (sourceFps <= 0 || rgbaPixels == null || width <= 0 || height <= 0) return;
 
+        String stage = "segment-setup";
         try
         {
             if (currentSegment == null)
@@ -158,11 +166,14 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
                 rotateSegment(width, height, timestamp);
             }
 
+            stage = "encode";
             int frameIndex = nextFrameIndex++;
             boolean isIdr = (frameIndex % idrPeriod) == 0;
             PendingMeta meta = new PendingMeta(currentSegment.id, timestamp, isIdr, frameIndex, needsBlur);
 
             byte[] prev = frameEncoder.encodeFrameRgba(rgbaPixels, width, height, isIdr, frameIndex);
+
+            stage = "ring-put";
             if (callCount >= EncodeResources.RING_DEPTH)
             {
                 PendingMeta drained = inFlight.poll();
@@ -176,7 +187,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         }
         catch (Exception e)
         {
-            log.error("streaming encode failed at ts={}", timestamp, e);
+            log.error("streaming encode failed during {} at ts={}", stage, timestamp, e);
         }
     }
 
@@ -199,26 +210,57 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         List<NalRing.Slot> all = nalRing.snapshot();
         if (all.isEmpty()) return null;
 
-        int targetSegment = -1;
-        for (NalRing.Slot s : all)
-        {
-            if (s.timestampMs >= startTime && s.timestampMs <= endTime && s.segmentId > targetSegment)
-            {
-                targetSegment = s.segmentId;
-            }
-        }
+        int targetSegment = pickLatestSegment(all, startTime, endTime);
         if (targetSegment < 0) return null;
 
-        // Pick the latest IDR at or before startTime so the clip starts with
-        // at least the requested window of pre-roll (might overshoot by up
-        // to one IDR period, which is fine - missing pre-roll is the worse
-        // failure mode). Fall back to the first IDR after startTime if none
-        // preceded it (recording started inside the window).
-        int idrIdx = -1;
-        for (int i = 0; i < all.size(); i++)
+        int idrIdx = findIdrIndex(all, targetSegment, startTime, endTime);
+        if (idrIdx < 0)
         {
-            NalRing.Slot s = all.get(i);
-            if (s.segmentId != targetSegment || !s.isIdr) continue;
+            log.warn("streaming finalize: no IDR in [{}, {}] for segment {}", startTime, endTime, targetSegment);
+            return null;
+        }
+
+        List<NalRing.Slot> chosen = collectFromIdr(all, idrIdx, targetSegment, endTime);
+        if (chosen.isEmpty()) return null;
+
+        EncodeSegment seg = findSegment(targetSegment);
+        if (seg == null) return null;
+
+        return assembleMp4(chosen, seg);
+    }
+
+    /**
+     * Picks the latest {@code segmentId} that has at least one frame whose
+     * timestamp falls inside {@code [startTime, endTime]}. Returns {@code -1}
+     * if no segment is in window.
+     */
+    static int pickLatestSegment(List<NalRing.Slot> slots, long startTime, long endTime)
+    {
+        int target = -1;
+        for (NalRing.Slot s : slots)
+        {
+            if (s.timestampMs >= startTime && s.timestampMs <= endTime && s.segmentId > target)
+            {
+                target = s.segmentId;
+            }
+        }
+        return target;
+    }
+
+    /**
+     * Finds the index of the IDR to start the clip from. Prefers the latest
+     * IDR at or before {@code startTime} (so the clip captures the requested
+     * pre-roll); falls back to the first IDR after {@code startTime} if none
+     * preceded it. Returns {@code -1} if the segment has no IDR in the
+     * window.
+     */
+    static int findIdrIndex(List<NalRing.Slot> slots, int segmentId, long startTime, long endTime)
+    {
+        int idrIdx = -1;
+        for (int i = 0; i < slots.size(); i++)
+        {
+            NalRing.Slot s = slots.get(i);
+            if (s.segmentId != segmentId || !s.isIdr) continue;
             if (s.timestampMs > endTime) break;
             if (s.timestampMs <= startTime)
             {
@@ -234,24 +276,28 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
                 break;
             }
         }
-        if (idrIdx < 0)
-        {
-            log.warn("streaming finalize: no IDR in [{}, {}] for segment {}", startTime, endTime, targetSegment);
-            return null;
-        }
+        return idrIdx;
+    }
 
+    /**
+     * Collects slots starting at {@code startIdx} until either the segment
+     * changes or a slot's timestamp exceeds {@code endTime}.
+     */
+    static List<NalRing.Slot> collectFromIdr(List<NalRing.Slot> slots, int startIdx,
+                                             int segmentId, long endTime)
+    {
         List<NalRing.Slot> chosen = new ArrayList<>();
-        for (int i = idrIdx; i < all.size(); i++)
+        for (int i = startIdx; i < slots.size(); i++)
         {
-            NalRing.Slot s = all.get(i);
-            if (s.segmentId != targetSegment || s.timestampMs > endTime) break;
+            NalRing.Slot s = slots.get(i);
+            if (s.segmentId != segmentId || s.timestampMs > endTime) break;
             chosen.add(s);
         }
-        if (chosen.isEmpty()) return null;
+        return chosen;
+    }
 
-        EncodeSegment seg = findSegment(targetSegment);
-        if (seg == null) return null;
-
+    private ClipData assembleMp4(List<NalRing.Slot> chosen, EncodeSegment seg)
+    {
         ByteArrayOutputStream bs = new ByteArrayOutputStream(chosen.size() * 50000);
         long[] timestamps = new long[chosen.size()];
         for (int i = 0; i < chosen.size(); i++)
@@ -268,7 +314,6 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             }
             timestamps[i] = s.timestampMs;
         }
-
         byte[] mp4 = LocalMp4Writer.toBytes(bs.toByteArray(), seg.spsPps,
             seg.sourceWidth, seg.sourceHeight, seg.fps, timestamps);
         return new ClipData(Collections.singletonList(mp4), "video/mp4", mp4.length);
@@ -316,24 +361,34 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             vulkanInitialized = true;
         }
 
-        sessionConfig = new H264SessionConfig(vulkanDevice, caps, codedWidth, codedHeight, sourceFps);
-        sessionConfig.initialize();
+        try
+        {
+            sessionConfig = new H264SessionConfig(vulkanDevice, caps, codedWidth, codedHeight, sourceFps);
+            sessionConfig.initialize();
 
-        resources = new EncodeResources(vulkanDevice, caps, codedWidth, codedHeight);
-        allocateCommandBuffers();
+            resources = new EncodeResources(vulkanDevice, caps, codedWidth, codedHeight);
+            allocateCommandBuffers();
 
-        frameEncoder = new FrameEncoder(
-            vulkanDevice, caps, sessionConfig, resources,
-            commandBuffers, gfxCommandBuffers,
-            encodeFences, uploadSemaphores,
-            codedWidth, codedHeight, sourceFps, idrPeriod,
-            averageBitrateBps, peakBitrateBps);
+            frameEncoder = new FrameEncoder(
+                vulkanDevice, caps, sessionConfig, resources,
+                commandBuffers, gfxCommandBuffers,
+                encodeFences, uploadSemaphores,
+                codedWidth, codedHeight, sourceFps, idrPeriod,
+                averageBitrateBps, peakBitrateBps);
 
-        byte[] spsPps = sessionConfig.fetchEncodedSpsPps(0, 0, true, true);
-        currentSegment = new EncodeSegment(nextSegmentId++,
-            sourceWidth, sourceHeight, codedWidth, codedHeight, sourceFps,
-            spsPps, firstTimestamp);
-        segments.add(currentSegment);
+            byte[] spsPps = sessionConfig.fetchEncodedSpsPps(0, 0, true, true);
+            currentSegment = new EncodeSegment(nextSegmentId++,
+                sourceWidth, sourceHeight, codedWidth, codedHeight, sourceFps,
+                spsPps, firstTimestamp);
+            segments.add(currentSegment);
+        }
+        catch (RuntimeException e)
+        {
+            // Roll back any partial init so the next frame retries from a
+            // clean state instead of leaking the half-built session.
+            destroySession();
+            throw e;
+        }
     }
 
     private void drainPending()

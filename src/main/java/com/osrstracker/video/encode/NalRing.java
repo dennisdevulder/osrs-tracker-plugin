@@ -32,24 +32,28 @@ import java.util.List;
  * streaming-encode path: each slot holds an Annex-B NAL payload tagged with
  * the segment that produced it, so finalize can pick frames from a single
  * session and trim to an IDR.
+ *
+ * Package-private: {@link Slot} aliases the underlying {@code byte[]} as
+ * a final field, which is safe inside this package but should not be
+ * exposed externally.
  */
-public final class NalRing
+final class NalRing
 {
     /** 600 slots covers 10s of pre-roll at up to 60fps; ~12-24MB at typical
      *  H.264 NAL sizes, well under the heap-pressure ceiling. */
-    public static final int DEFAULT_CAPACITY = 600;
+    static final int DEFAULT_CAPACITY = 600;
 
-    public static final class Slot
+    static final class Slot
     {
-        public final int segmentId;
-        public final long timestampMs;
-        public final boolean isIdr;
-        public final int frameNum;
-        public final boolean needsBlur;
-        public final byte[] nalUnits;
+        final int segmentId;
+        final long timestampMs;
+        final boolean isIdr;
+        final int frameNum;
+        final boolean needsBlur;
+        final byte[] nalUnits;
 
-        public Slot(int segmentId, long timestampMs, boolean isIdr, int frameNum,
-                    boolean needsBlur, byte[] nalUnits)
+        Slot(int segmentId, long timestampMs, boolean isIdr, int frameNum,
+             boolean needsBlur, byte[] nalUnits)
         {
             this.segmentId = segmentId;
             this.timestampMs = timestampMs;
@@ -66,19 +70,19 @@ public final class NalRing
     private int writeIndex;
     private int count;
 
-    public NalRing()
+    NalRing()
     {
         this(DEFAULT_CAPACITY);
     }
 
-    public NalRing(int capacity)
+    NalRing(int capacity)
     {
         if (capacity <= 0) throw new IllegalArgumentException("capacity must be positive");
         this.capacity = capacity;
         this.slots = new Slot[capacity];
     }
 
-    public void put(Slot slot)
+    void put(Slot slot)
     {
         if (slot == null) throw new IllegalArgumentException("slot must not be null");
         synchronized (lock)
@@ -90,7 +94,7 @@ public final class NalRing
     }
 
     /** Slots in chronological order (oldest first). */
-    public List<Slot> snapshot()
+    List<Slot> snapshot()
     {
         synchronized (lock)
         {
@@ -104,7 +108,7 @@ public final class NalRing
         }
     }
 
-    public int size()
+    int size()
     {
         synchronized (lock)
         {
@@ -112,12 +116,12 @@ public final class NalRing
         }
     }
 
-    public int capacity()
+    int capacity()
     {
         return capacity;
     }
 
-    public void reset()
+    void reset()
     {
         synchronized (lock)
         {

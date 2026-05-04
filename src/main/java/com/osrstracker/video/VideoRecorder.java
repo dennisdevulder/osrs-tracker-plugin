@@ -87,8 +87,14 @@ public class VideoRecorder
 
     private final AtomicInteger pendingEncodes = new AtomicInteger(0);
     /** Cap on simultaneously in-flight capture submissions. Each pending entry
-     *  pins an ~8 MB pooled byte[] at 1080p, so the cap doubles as a heap
-     *  budget. 6 × 8 MB ≈ 48 MB peak, comfortable below the ~150 MB ceiling. */
+     *  pins one pooled RGBA byte[] (4 × width × height bytes) so the cap
+     *  doubles as a heap budget.
+     *
+     *  Tuned for 1080p: 6 × ~8 MB ≈ 48 MB peak, well below the ~150 MB heap
+     *  ceiling. At ultrawide and above, peak in-flight memory grows linearly
+     *  with pixel count — at 4K (33 MB/frame) this constant becomes a heap
+     *  hazard and should be reduced or made dynamic. Revisit when 4K capture
+     *  ships. */
     private static final int MAX_PENDING_ENCODES = 6;
 
     private final AtomicBoolean sensitiveContentVisible = new AtomicBoolean(false);

@@ -42,6 +42,10 @@ import static org.lwjgl.vulkan.video.STDVulkanVideoCodecH264.*;
  *
  * One instance is valid for a single padded (w,h,fps). Dimension changes
  * rebuild this and {@link EncodeResources}.
+ *
+ * Not thread-safe. {@link #paddedPixels}, {@link #pendingFrame}, and the
+ * Vulkan command pools (which command buffers borrow) all assume serial
+ * access. Callers must externally synchronise concurrent invocations.
  */
 @Slf4j
 final class FrameEncoder
