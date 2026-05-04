@@ -106,18 +106,39 @@ final class FrameEncoder
     byte[] encodeFrame(BufferedImage frame, int width, int height,
                        boolean isIdr, int frameIndex)
     {
-        VkDevice device = vulkanDevice.getDevice();
         int ringSlot = frameIndex % EncodeResources.RING_DEPTH;
-
-        byte[] prev = null;
-        if (pendingFrame[ringSlot] != -1)
-        {
-            prev = drainSlot(ringSlot);
-        }
+        byte[] prev = drainIfPending(ringSlot);
 
         int yBytes = encodedWidth * encodedHeight;
         stageNv12Frame(frame, width, height, yBytes, ringSlot);
 
+        return submitStagedFrame(isIdr, frameIndex, ringSlot, yBytes, prev);
+    }
+
+    /**
+     * Streaming-encode entry point: skips the JPEG roundtrip and stages NV12
+     * directly from raw bottom-up RGBA (OpenGL convention).
+     */
+    byte[] encodeFrameRgba(ByteBuffer rgba, int width, int height,
+                           boolean isIdr, int frameIndex)
+    {
+        int ringSlot = frameIndex % EncodeResources.RING_DEPTH;
+        byte[] prev = drainIfPending(ringSlot);
+
+        int yBytes = encodedWidth * encodedHeight;
+        stageNv12FrameFromRgba(rgba, width, height, yBytes, ringSlot);
+
+        return submitStagedFrame(isIdr, frameIndex, ringSlot, yBytes, prev);
+    }
+
+    private byte[] drainIfPending(int ringSlot)
+    {
+        return pendingFrame[ringSlot] != -1 ? drainSlot(ringSlot) : null;
+    }
+
+    private byte[] submitStagedFrame(boolean isIdr, int frameIndex, int ringSlot, int yBytes, byte[] prev)
+    {
+        VkDevice device = vulkanDevice.getDevice();
         try (MemoryStack stack = stackPush())
         {
             if (!resetSlotSync(device, ringSlot)) return prev;
@@ -243,6 +264,34 @@ final class FrameEncoder
         int frameH = Math.min(Math.min(height, frame.getHeight()), encodedHeight);
         Arrays.fill(paddedPixels, 0);
         frame.getRGB(0, 0, frameW, frameH, paddedPixels, 0, encodedWidth);
+
+        int uvBytes = encodedWidth * encodedHeight / 2;
+        ByteBuffer staging = memByteBuffer(resources.stagingMappedPtr[ringSlot], yBytes + uvBytes);
+        staging.clear();
+        Nv12Converter.argbToNv12(paddedPixels, encodedWidth, encodedHeight, staging);
+    }
+
+    private void stageNv12FrameFromRgba(ByteBuffer rgba, int width, int height, int yBytes, int ringSlot)
+    {
+        int frameW = Math.min(width, encodedWidth);
+        int frameH = Math.min(height, encodedHeight);
+        Arrays.fill(paddedPixels, 0);
+
+        // Source rows are bottom-up (OpenGL); flip while packing into top-down ARGB.
+        int srcRowStride = width * 4;
+        for (int y = 0; y < frameH; y++)
+        {
+            int srcRow = (height - 1 - y) * srcRowStride;
+            int dstRow = y * encodedWidth;
+            for (int x = 0; x < frameW; x++)
+            {
+                int srcIdx = srcRow + (x << 2);
+                int r = rgba.get(srcIdx) & 0xFF;
+                int g = rgba.get(srcIdx + 1) & 0xFF;
+                int b = rgba.get(srcIdx + 2) & 0xFF;
+                paddedPixels[dstRow + x] = (r << 16) | (g << 8) | b;
+            }
+        }
 
         int uvBytes = encodedWidth * encodedHeight / 2;
         ByteBuffer staging = memByteBuffer(resources.stagingMappedPtr[ringSlot], yBytes + uvBytes);
