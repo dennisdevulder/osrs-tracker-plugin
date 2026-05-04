@@ -35,7 +35,9 @@ import java.util.List;
  */
 public final class NalRing
 {
-    public static final int DEFAULT_CAPACITY = 300;
+    /** 600 slots covers 10s of pre-roll at up to 60fps; ~12-24MB at typical
+     *  H.264 NAL sizes, well under the heap-pressure ceiling. */
+    public static final int DEFAULT_CAPACITY = 600;
 
     public static final class Slot
     {

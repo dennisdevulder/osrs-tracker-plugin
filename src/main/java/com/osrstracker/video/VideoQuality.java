@@ -66,6 +66,17 @@ public enum VideoQuality
 		10000, // 10 seconds
 		30,    // 30 FPS
 		0.80f  // 80% JPEG quality
+	),
+
+	/**
+	 * Smooth video - high frame rate for fast-moving content.
+	 * 10 seconds @ 60 FPS, 80% JPEG quality, 1080p
+	 */
+	SMOOTH(
+		"Video: Smooth (60 FPS)",
+		10000, // 10 seconds
+		60,    // 60 FPS
+		0.80f  // 80% JPEG quality
 	);
 
 	private final String displayName;
