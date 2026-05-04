@@ -182,8 +182,10 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
 
     private void rotateSegment(int width, int height, long timestamp)
     {
-        log.debug("streaming encoder: resize {}x{} -> {}x{}, opening new segment",
-            currentSegment.sourceWidth, currentSegment.sourceHeight, width, height);
+        log.info("streaming encoder: rotate segment src {}x{} (coded {}x{}) -> {}x{}",
+            currentSegment.sourceWidth, currentSegment.sourceHeight,
+            currentSegment.codedWidth, currentSegment.codedHeight,
+            width, height);
         drainPending();
         destroySession();
         callCount = 0;
@@ -200,22 +202,45 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         if (all.isEmpty()) return null;
 
         int targetSegment = -1;
+        long oldestTs = Long.MAX_VALUE;
+        long newestTs = Long.MIN_VALUE;
+        java.util.Set<Integer> segmentsInRing = new java.util.HashSet<>();
         for (NalRing.Slot s : all)
         {
+            segmentsInRing.add(s.segmentId);
+            if (s.timestampMs < oldestTs) oldestTs = s.timestampMs;
+            if (s.timestampMs > newestTs) newestTs = s.timestampMs;
             if (s.timestampMs >= startTime && s.timestampMs <= endTime && s.segmentId > targetSegment)
             {
                 targetSegment = s.segmentId;
             }
         }
+        log.info("finalizeClip: window=[{}, {}] ringSize={} ringSpan=[{}, {}] segmentsInRing={} targetSegment={}",
+            startTime, endTime, all.size(), oldestTs, newestTs, segmentsInRing, targetSegment);
         if (targetSegment < 0) return null;
 
+        // Pick the latest IDR at or before startTime so the clip starts with
+        // at least the requested window of pre-roll (might overshoot by up
+        // to one IDR period, which is fine - missing pre-roll is the worse
+        // failure mode). Fall back to the first IDR after startTime if none
+        // preceded it (recording started inside the window).
         int idrIdx = -1;
         for (int i = 0; i < all.size(); i++)
         {
             NalRing.Slot s = all.get(i);
-            if (s.segmentId == targetSegment && s.isIdr && s.timestampMs >= startTime)
+            if (s.segmentId != targetSegment || !s.isIdr) continue;
+            if (s.timestampMs > endTime) break;
+            if (s.timestampMs <= startTime)
             {
                 idrIdx = i;
+            }
+            else if (idrIdx < 0)
+            {
+                idrIdx = i;
+                break;
+            }
+            else
+            {
                 break;
             }
         }
@@ -224,6 +249,9 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             log.warn("streaming finalize: no IDR in [{}, {}] for segment {}", startTime, endTime, targetSegment);
             return null;
         }
+        log.info("finalizeClip: chose segment {}, IDR at idx {} ts {} (vs startTime {}, leadIn {}ms)",
+            targetSegment, idrIdx, all.get(idrIdx).timestampMs, startTime,
+            startTime - all.get(idrIdx).timestampMs);
 
         List<NalRing.Slot> chosen = new ArrayList<>();
         for (int i = idrIdx; i < all.size(); i++)
