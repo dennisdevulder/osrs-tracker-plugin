@@ -86,7 +86,10 @@ public class VideoRecorder
     private final AtomicBoolean isCapturingPostEvent = new AtomicBoolean(false);
 
     private final AtomicInteger pendingEncodes = new AtomicInteger(0);
-    private static final int MAX_PENDING_ENCODES = 4;
+    /** Cap on simultaneously in-flight capture submissions. Each pending entry
+     *  pins an ~8 MB pooled byte[] at 1080p, so the cap doubles as a heap
+     *  budget. 6 × 8 MB ≈ 48 MB peak, comfortable below the ~150 MB ceiling. */
+    private static final int MAX_PENDING_ENCODES = 6;
 
     private final AtomicBoolean sensitiveContentVisible = new AtomicBoolean(false);
     private final AtomicLong lastSensitiveCheck = new AtomicLong(0);
@@ -126,7 +129,7 @@ public class VideoRecorder
             t.setDaemon(true);
             return t;
         });
-        this.asyncWriter = Executors.newFixedThreadPool(2, r -> {
+        this.asyncWriter = Executors.newFixedThreadPool(3, r -> {
             Thread t = new Thread(r, "OSRS-Tracker-Video-Writer");
             t.setDaemon(true);
             return t;
@@ -253,6 +256,10 @@ public class VideoRecorder
         currentCaptureFps = quality.getFps() > 0 ? quality.getFps() : 30;
         currentJpegQuality = quality.getJpegQuality() > 0 ? quality.getJpegQuality() : 0.5f;
 
+        if (quality.getAverageBitrateBps() > 0)
+        {
+            encoder.configureBitrate(quality.getAverageBitrateBps(), quality.getPeakBitrateBps());
+        }
         encoder.start(currentCaptureFps, currentJpegQuality);
         log.debug("Video capture started at {} FPS (encoder={})", currentCaptureFps, encoder.encoderName());
 

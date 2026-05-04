@@ -78,6 +78,8 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
 
     private int sourceFps = -1;
     private int idrPeriod = -1;
+    private long averageBitrateBps = FrameEncoder.DEFAULT_AVERAGE_BITRATE_BPS;
+    private long peakBitrateBps = FrameEncoder.DEFAULT_PEAK_BITRATE_BPS;
     private int nextFrameIndex;
     private int nextSegmentId;
     private long callCount;
@@ -106,6 +108,18 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         nalRing.reset();
         segments.clear();
         inFlight.clear();
+    }
+
+    @Override
+    public synchronized void configureBitrate(int averageBps, int peakBps)
+    {
+        if (averageBps <= 0 || peakBps < averageBps)
+        {
+            log.warn("ignoring invalid bitrate config: avg={} peak={}", averageBps, peakBps);
+            return;
+        }
+        this.averageBitrateBps = averageBps;
+        this.peakBitrateBps = peakBps;
     }
 
     /**
@@ -294,7 +308,8 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             vulkanDevice, caps, sessionConfig, resources,
             commandBuffers, gfxCommandBuffers,
             encodeFences, uploadSemaphores,
-            codedWidth, codedHeight, sourceFps, idrPeriod);
+            codedWidth, codedHeight, sourceFps, idrPeriod,
+            averageBitrateBps, peakBitrateBps);
 
         byte[] spsPps = sessionConfig.fetchEncodedSpsPps(0, 0, true, true);
         currentSegment = new EncodeSegment(nextSegmentId++,

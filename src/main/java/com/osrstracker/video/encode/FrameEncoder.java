@@ -48,9 +48,11 @@ final class FrameEncoder
 {
     private static final long FENCE_TIMEOUT_NS = 5_000_000_000L;
 
-    private static final long VBR_AVERAGE_BITRATE_BPS       = 10_000_000L;
-    // Peak 1.5x avg. With max==avg, VBR degenerates to CBR.
-    private static final long VBR_MAX_BITRATE_BPS           = 15_000_000L;
+    // Default bitrates if the caller doesn't configure them. Peak 1.5x avg;
+    // with max==avg, VBR degenerates to CBR.
+    static final long DEFAULT_AVERAGE_BITRATE_BPS = 10_000_000L;
+    static final long DEFAULT_PEAK_BITRATE_BPS    = 15_000_000L;
+
     private static final int  VBR_VIRTUAL_BUFFER_MS         = 2000;
     private static final int  VBR_INITIAL_VIRTUAL_BUFFER_MS = 1000;
 
@@ -66,6 +68,8 @@ final class FrameEncoder
     private final int encodedHeight;
     private final int fps;
     private final int idrPeriod;
+    private final long averageBitrateBps;
+    private final long peakBitrateBps;
 
     /** Reused across frames. Right/bottom padding is never written and stays
      *  at the zero initialiser; hidden by SPS frame_cropping at decode. */
@@ -81,9 +85,15 @@ final class FrameEncoder
                  H264SessionConfig sessionConfig, EncodeResources resources,
                  VkCommandBuffer[] commandBuffers, VkCommandBuffer[] gfxCommandBuffers,
                  long[] encodeFences, long[] uploadSemaphores,
-                 int encodedWidth, int encodedHeight, int fps, int idrPeriod)
+                 int encodedWidth, int encodedHeight, int fps, int idrPeriod,
+                 long averageBitrateBps, long peakBitrateBps)
     {
         if (idrPeriod <= 0) throw new IllegalArgumentException("idrPeriod must be positive");
+        if (averageBitrateBps <= 0 || peakBitrateBps < averageBitrateBps)
+        {
+            throw new IllegalArgumentException(
+                "invalid bitrate: avg=" + averageBitrateBps + " peak=" + peakBitrateBps);
+        }
         this.vulkanDevice = vulkanDevice;
         this.caps = caps;
         this.sessionConfig = sessionConfig;
@@ -96,6 +106,8 @@ final class FrameEncoder
         this.encodedHeight = encodedHeight;
         this.fps = fps;
         this.idrPeriod = idrPeriod;
+        this.averageBitrateBps = averageBitrateBps;
+        this.peakBitrateBps = peakBitrateBps;
         this.paddedPixels = new int[encodedWidth * encodedHeight];
         Arrays.fill(pendingFrame, -1);
     }
@@ -871,8 +883,8 @@ final class FrameEncoder
         encodeLayer.get(0)
             .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_LAYER_INFO_KHR)
             .pNext(h264LayerInfo.address())
-            .averageBitrate(VBR_AVERAGE_BITRATE_BPS)
-            .maxBitrate(VBR_MAX_BITRATE_BPS)
+            .averageBitrate(averageBitrateBps)
+            .maxBitrate(peakBitrateBps)
             .frameRateNumerator(fps)
             .frameRateDenominator(1);
 

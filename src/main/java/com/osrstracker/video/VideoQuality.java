@@ -28,79 +28,50 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 
 /**
- * Video quality presets for recording.
- * Frames are captured as JPEG and uploaded to the server for processing.
+ * Video quality presets. {@code jpegQuality} drives the MJPEG fallback path;
+ * {@code averageBitrateBps}/{@code peakBitrateBps} drive the streaming H.264
+ * encoder. Higher fps presets get a higher bitrate so per-frame quality stays
+ * roughly comparable.
  */
 @Getter
 @RequiredArgsConstructor
 public enum VideoQuality
 {
-	/**
-	 * Screenshot only - no video recording.
-	 */
 	SCREENSHOT_ONLY(
 		"Screenshot Only",
-		0,     // No video
-		0,     // No FPS
-		0.0f   // No quality
+		0, 0, 0.0f, 0, 0
 	),
 
-	/**
-	 * Performance video - reduced FPS for lower CPU overhead.
-	 * 10 seconds @ 20 FPS, 80% JPEG quality, 1080p
-	 * 33% fewer capture calls than Quality mode.
-	 */
 	PERFORMANCE(
 		"Video: Performance (20 FPS)",
-		10000, // 10 seconds
-		20,    // 20 FPS
-		0.80f  // 80% JPEG quality
+		10000, 20, 0.80f,
+		4_000_000, 6_000_000
 	),
 
-	/**
-	 * Quality video - smooth playback at full frame rate.
-	 * 10 seconds @ 30 FPS, 80% JPEG quality, 1080p
-	 */
 	QUALITY(
 		"Video: Quality (30 FPS)",
-		10000, // 10 seconds
-		30,    // 30 FPS
-		0.80f  // 80% JPEG quality
+		10000, 30, 0.80f,
+		8_000_000, 12_000_000
 	),
 
-	/**
-	 * Smooth video - high frame rate for fast-moving content.
-	 * 10 seconds @ 60 FPS, 80% JPEG quality, 1080p
-	 */
 	SMOOTH(
 		"Video: Smooth (60 FPS)",
-		10000, // 10 seconds
-		60,    // 60 FPS
-		0.80f  // 80% JPEG quality
+		10000, 60, 0.80f,
+		12_000_000, 18_000_000
 	);
 
 	private final String displayName;
 	private final int durationMs;
 	private final int fps;
 	private final float jpegQuality;
+	private final int averageBitrateBps;
+	private final int peakBitrateBps;
 
-	/**
-	 * Checks if this quality preset requires video recording.
-	 *
-	 * @return true if this preset records video frames
-	 */
 	public boolean requiresVideo()
 	{
 		return this != SCREENSHOT_ONLY;
 	}
 
-	/**
-	 * Gets the default quality preset.
-	 * Default to screenshot-only for minimal bandwidth and storage usage.
-	 * Users can opt-in to video recording if desired.
-	 *
-	 * @return SCREENSHOT_ONLY as the default
-	 */
 	public static VideoQuality getDefault()
 	{
 		return SCREENSHOT_ONLY;

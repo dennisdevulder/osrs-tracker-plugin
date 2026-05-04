@@ -298,7 +298,8 @@ public class VulkanEncoder implements VideoEncoder, AutoCloseable
             vulkanDevice, caps, sessionConfig, resources,
             commandBuffers, gfxCommandBuffers,
             encodeFences, uploadSemaphores,
-            width, height, fps, fps);
+            width, height, fps, fps,
+            FrameEncoder.DEFAULT_AVERAGE_BITRATE_BPS, FrameEncoder.DEFAULT_PEAK_BITRATE_BPS);
     }
 
     private void createCommandPool()

@@ -43,6 +43,13 @@ public interface VideoEncoder
     void start(int fps, float quality);
 
     /**
+     * Configures the H.264 rate-control bitrate target for the next recording.
+     * No-op for encoders that don't use a bitrate (MJPEG). Should be called
+     * before {@link #start} when the encoder is rate-controlled.
+     */
+    default void configureBitrate(int averageBps, int peakBps) {}
+
+    /**
      * Stops recording and releases resources. Buffer contents are cleared.
      */
     void stop();
