@@ -90,12 +90,17 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         this.caps = caps;
     }
 
+    /** 5-second IDR cadence: balances trim-to-keyframe granularity against
+     *  bitrate spent on keyframes. With ~10s of pre-roll buffered, the worst-
+     *  case "first frame after the chosen IDR" latency is one IDR period. */
+    private static final int IDR_PERIOD_SECONDS = 5;
+
     @Override
     public synchronized void start(int fps, float quality)
     {
         if (fps <= 0) throw new IllegalArgumentException("fps must be positive, got " + fps);
         this.sourceFps = fps;
-        this.idrPeriod = fps;
+        this.idrPeriod = fps * IDR_PERIOD_SECONDS;
         this.nextFrameIndex = 0;
         this.callCount = 0;
         nalRing.reset();
@@ -278,7 +283,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             vulkanDevice, caps, sessionConfig, resources,
             commandBuffers, gfxCommandBuffers,
             encodeFences, uploadSemaphores,
-            codedWidth, codedHeight, sourceFps);
+            codedWidth, codedHeight, sourceFps, idrPeriod);
 
         byte[] spsPps = sessionConfig.fetchEncodedSpsPps(0, 0, true, true);
         currentSegment = new EncodeSegment(nextSegmentId++,

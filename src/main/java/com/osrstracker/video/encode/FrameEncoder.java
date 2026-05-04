@@ -65,6 +65,7 @@ final class FrameEncoder
     private final int encodedWidth;
     private final int encodedHeight;
     private final int fps;
+    private final int idrPeriod;
 
     /** Reused across frames. Right/bottom padding is never written and stays
      *  at the zero initialiser; hidden by SPS frame_cropping at decode. */
@@ -80,8 +81,9 @@ final class FrameEncoder
                  H264SessionConfig sessionConfig, EncodeResources resources,
                  VkCommandBuffer[] commandBuffers, VkCommandBuffer[] gfxCommandBuffers,
                  long[] encodeFences, long[] uploadSemaphores,
-                 int encodedWidth, int encodedHeight, int fps)
+                 int encodedWidth, int encodedHeight, int fps, int idrPeriod)
     {
+        if (idrPeriod <= 0) throw new IllegalArgumentException("idrPeriod must be positive");
         this.vulkanDevice = vulkanDevice;
         this.caps = caps;
         this.sessionConfig = sessionConfig;
@@ -93,6 +95,7 @@ final class FrameEncoder
         this.encodedWidth = encodedWidth;
         this.encodedHeight = encodedHeight;
         this.fps = fps;
+        this.idrPeriod = idrPeriod;
         this.paddedPixels = new int[encodedWidth * encodedHeight];
         Arrays.fill(pendingFrame, -1);
     }
@@ -538,8 +541,8 @@ final class FrameEncoder
 
         // GopRemainingFrameInfo hints the firmware about upcoming I/P counts;
         // required in practice on VCN even though caps reports it as optional.
-        int frameInGop = frameIndex % fps;
-        int remainingInGop = fps - frameInGop;
+        int frameInGop = frameIndex % idrPeriod;
+        int remainingInGop = idrPeriod - frameInGop;
         int remainingI = isIdr ? 1 : 0;
         int remainingP = isIdr ? (remainingInGop - 1) : remainingInGop;
         VkVideoEncodeH264GopRemainingFrameInfoKHR gopRemaining =
@@ -585,7 +588,7 @@ final class FrameEncoder
      *  log2_max_frame_num_minus4 = 0). Resets to 0 at each IDR. */
     private int frameNumInGop(int frameIndex)
     {
-        return (frameIndex % fps) & 0xF;
+        return (frameIndex % idrPeriod) & 0xF;
     }
 
     /** POC LSB, modulo MaxPicOrderCntLsb (256). Must wrap independently
@@ -593,7 +596,7 @@ final class FrameEncoder
      *  re-ordering glitches in the decoder. */
     private int pocInGop(int frameIndex)
     {
-        return ((frameIndex % fps) * 2) & 0xFF;
+        return ((frameIndex % idrPeriod) * 2) & 0xFF;
     }
 
     /**
@@ -760,7 +763,7 @@ final class FrameEncoder
 
         // Reference slot: the previous frame. Its IDR status = whether the
         // prior frame was at the GOP boundary.
-        boolean refIsIdr = (frameIndex - 1) % fps == 0;
+        boolean refIsIdr = (frameIndex - 1) % idrPeriod == 0;
         int refFrameNum = refIsIdr ? 0 : frameNumInGop(frameIndex - 1);
         int refPoc = pocInGop(frameIndex - 1);
         int refPicType = refIsIdr
@@ -879,8 +882,8 @@ final class FrameEncoder
                 .sType(VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR)
                 .flags(VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR
                     | VK_VIDEO_ENCODE_H264_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR)
-                .gopFrameCount(fps)
-                .idrPeriod(fps)
+                .gopFrameCount(idrPeriod)
+                .idrPeriod(idrPeriod)
                 .consecutiveBFrameCount(0)
                 .temporalLayerCount(1);
 
@@ -901,7 +904,7 @@ final class FrameEncoder
     private VkVideoReferenceSlotInfoKHR.Buffer buildEncodeReferenceSlots(
         MemoryStack stack, int refSlot, int frameIndex)
     {
-        boolean refIsIdr = (frameIndex - 1) % fps == 0;
+        boolean refIsIdr = (frameIndex - 1) % idrPeriod == 0;
         int refFrameNum = refIsIdr ? 0 : frameNumInGop(frameIndex - 1);
         int refPoc = pocInGop(frameIndex - 1);
         int refPicType = refIsIdr
