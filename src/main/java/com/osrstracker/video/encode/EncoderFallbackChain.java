@@ -36,10 +36,6 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class EncoderFallbackChain
 {
-    /** Opt-in flag for the streaming H.264 encoder; off by default while we
-     *  bake it. Set {@code -Dosrstracker.video.streamingEncoder=true} to enable. */
-    private static final String STREAMING_FLAG = "osrstracker.video.streamingEncoder";
-
     private String fallbackReason;
 
     /**
@@ -93,12 +89,7 @@ public class EncoderFallbackChain
 
             // VulkanDevice stays open -- the encoder takes ownership
             fallbackReason = null;
-            if (Boolean.getBoolean(STREAMING_FLAG))
-            {
-                log.info("Streaming H.264 encoder enabled via {}", STREAMING_FLAG);
-                return new StreamingVulkanEncoder(vulkanDevice, caps);
-            }
-            return new VulkanEncoder(vulkanDevice, caps);
+            return new StreamingVulkanEncoder(vulkanDevice, caps);
         }
         catch (Exception e)
         {
