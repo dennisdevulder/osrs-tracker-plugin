@@ -28,9 +28,14 @@ import static org.lwjgl.vulkan.VK10.*;
  */
 final class EncodeResources implements AutoCloseable
 {
-    static final int BITSTREAM_BUFFER_SIZE = 4 * 1024 * 1024;
+    private static final int BITSTREAM_FLOOR_BYTES = 4 * 1024 * 1024;
     /** Depth of the encode ring. Frame N+RING_DEPTH reuses slot N's resources. */
     static final int RING_DEPTH = 2;
+
+    /** Per-slot bitstream buffer size, sized to comfortably hold one IDR at
+     *  the session's resolution. Uncompressed NV12 is a generous upper bound
+     *  for any single frame's H.264 NAL output. */
+    final int bitstreamBufferSize;
 
     private final VulkanDevice vulkanDevice;
     private final VulkanCapabilities caps;
@@ -61,6 +66,8 @@ final class EncodeResources implements AutoCloseable
     {
         this.vulkanDevice = vulkanDevice;
         this.caps = caps;
+        long nv12Bytes = (long) paddedWidth * paddedHeight * 3 / 2;
+        this.bitstreamBufferSize = (int) Math.max(BITSTREAM_FLOOR_BYTES, nv12Bytes);
         try
         {
             for (int i = 0; i < RING_DEPTH; i++)
@@ -226,7 +233,7 @@ final class EncodeResources implements AutoCloseable
             VkBufferCreateInfo bufferInfo = VkBufferCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
                 .pNext(profileList.address())
-                .size(BITSTREAM_BUFFER_SIZE)
+                .size(bitstreamBufferSize)
                 .usage(VK_BUFFER_USAGE_VIDEO_ENCODE_DST_BIT_KHR)
                 .sharingMode(VK_SHARING_MODE_EXCLUSIVE);
 
@@ -244,7 +251,7 @@ final class EncodeResources implements AutoCloseable
             disposables.add(() -> vkDestroyBuffer(device, bitstreamBuffer[slotF], null));
 
             PointerBuffer pData = stack.mallocPointer(1);
-            result = vkMapMemory(device, bitstreamMemory[slot], 0, BITSTREAM_BUFFER_SIZE, 0, pData);
+            result = vkMapMemory(device, bitstreamMemory[slot], 0, bitstreamBufferSize, 0, pData);
             if (result != VK_SUCCESS)
             {
                 throw new RuntimeException("vkMapMemory (bitstream slot " + slot + ") failed: " + result);

@@ -442,7 +442,7 @@ final class FrameEncoder
 
         recordEncodeCommand(stack, cb, isIdr, dpbSlot, refSlot, frameIndex, ringSlot);
 
-        VulkanBarriers.buffer(stack, cb, resources.bitstreamBuffer[ringSlot], EncodeResources.BITSTREAM_BUFFER_SIZE,
+        VulkanBarriers.buffer(stack, cb, resources.bitstreamBuffer[ringSlot], resources.bitstreamBufferSize,
             VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR, VK_ACCESS_HOST_READ_BIT,
             VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR, VK_PIPELINE_STAGE_HOST_BIT);
 
@@ -499,7 +499,7 @@ final class FrameEncoder
         long offset = results.get(0);
         long bytesWritten = results.get(1);
         if (bytesWritten <= 0 || offset < 0
-            || offset + bytesWritten > EncodeResources.BITSTREAM_BUFFER_SIZE)
+            || offset + bytesWritten > resources.bitstreamBufferSize)
         {
             log.error("encode feedback slot {} out of range: offset={} bytes={}",
                 ringSlot, offset, bytesWritten);
@@ -518,7 +518,7 @@ final class FrameEncoder
             return null;
         }
 
-        ByteBuffer bitstream = memByteBuffer(resources.bitstreamMappedPtr[ringSlot], EncodeResources.BITSTREAM_BUFFER_SIZE);
+        ByteBuffer bitstream = memByteBuffer(resources.bitstreamMappedPtr[ringSlot], resources.bitstreamBufferSize);
         byte[] naluData = new byte[(int) bytesWritten];
         bitstream.position((int) offset);
         bitstream.get(naluData, 0, (int) bytesWritten);
@@ -580,7 +580,7 @@ final class FrameEncoder
             .pNext(picInfo.address())
             .dstBuffer(resources.bitstreamBuffer[ringSlot])
             .dstBufferOffset(0)
-            .dstBufferRange(EncodeResources.BITSTREAM_BUFFER_SIZE)
+            .dstBufferRange(resources.bitstreamBufferSize)
             .srcPictureResource(srcPicture)
             .pSetupReferenceSlot(setupSlot)
             .pReferenceSlots(hasReference
