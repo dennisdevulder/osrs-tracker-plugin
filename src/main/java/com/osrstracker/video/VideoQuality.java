@@ -55,7 +55,7 @@ public enum VideoQuality
 	),
 
 	SMOOTH(
-		"Video: Smooth (60 FPS)",
+		"Experimental: 60 FPS",
 		10000, 60, 0.80f,
 		12_000_000, 18_000_000
 	);

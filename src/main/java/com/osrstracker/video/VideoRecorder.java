@@ -253,6 +253,11 @@ public class VideoRecorder
         }
 
         VideoQuality quality = config.videoQuality();
+        if (quality == VideoQuality.SMOOTH && !"vulkan-h264-streaming".equals(encoder.encoderName()))
+        {
+            log.info("Experimental 60 FPS preset requires the streaming Vulkan encoder; falling back to Quality.");
+            quality = VideoQuality.QUALITY;
+        }
         currentCaptureFps = quality.getFps() > 0 ? quality.getFps() : 30;
         currentJpegQuality = quality.getJpegQuality() > 0 ? quality.getJpegQuality() : 0.5f;
 
