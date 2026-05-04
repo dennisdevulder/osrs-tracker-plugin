@@ -184,7 +184,11 @@ final class FrameEncoder
         pendingFrame[ringSlot] = frameIndex;
     }
 
-    /** Waits all in-flight slots and returns their bitstreams in submission order. */
+    /**
+     * Waits all in-flight slots and returns their bitstreams in submission
+     * order. Failed drains appear as {@code null} entries so callers that
+     * pair NALs with per-frame metadata (streaming encode) can keep alignment.
+     */
     List<byte[]> drainRemaining()
     {
         int n = 0;
@@ -207,8 +211,7 @@ final class FrameEncoder
         List<byte[]> out = new ArrayList<>(n);
         for (int i = 0; i < n; i++)
         {
-            byte[] b = drainSlot(slots[i]);
-            if (b != null) out.add(b);
+            out.add(drainSlot(slots[i]));
         }
         return out;
     }
