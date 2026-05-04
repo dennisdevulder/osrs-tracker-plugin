@@ -57,6 +57,7 @@ public class AsyncFrameCapture
     private final DrawManager drawManager;
     private final VideoRecorder recorder;
     private final Runnable onPboUnsupported;
+    private final BytePool pixelPool = new BytePool();
 
     // Double-buffered PBOs
     private final int[] pboIds = new int[2];
@@ -269,13 +270,14 @@ public class AsyncFrameCapture
                 if (mappedBuffer != null)
                 {
                     int dataSize = lastWidth * lastHeight * 4;
-                    byte[] pixelCopy = new byte[dataSize];
+                    byte[] pixelCopy = pixelPool.acquire(dataSize);
                     mappedBuffer.rewind();
                     mappedBuffer.get(pixelCopy);
                     GL15.glUnmapBuffer(GL21.GL_PIXEL_PACK_BUFFER);
 
                     ByteBuffer pixelData = ByteBuffer.wrap(pixelCopy);
-                    recorder.submitCapturedFrame(pixelData, lastWidth, lastHeight);
+                    recorder.submitCapturedFrame(pixelData, lastWidth, lastHeight,
+                        () -> pixelPool.release(pixelCopy));
                 }
                 else
                 {

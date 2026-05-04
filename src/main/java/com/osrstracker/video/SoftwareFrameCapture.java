@@ -135,6 +135,6 @@ public class SoftwareFrameCapture
             }
         }
 
-        recorder.submitCapturedFrame(ByteBuffer.wrap(rgba), width, height);
+        recorder.submitCapturedFrame(ByteBuffer.wrap(rgba), width, height, null);
     }
 }

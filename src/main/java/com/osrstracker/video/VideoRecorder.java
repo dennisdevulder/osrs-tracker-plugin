@@ -170,7 +170,7 @@ public class VideoRecorder
         return pendingEncodes.get() < MAX_PENDING_ENCODES;
     }
 
-    void submitCapturedFrame(ByteBuffer rgbaPixels, int width, int height)
+    void submitCapturedFrame(ByteBuffer rgbaPixels, int width, int height, Runnable onConsumed)
     {
         long currentTimeMs = System.currentTimeMillis();
         boolean shouldBlur = getCachedSensitiveContentVisible(currentTimeMs);
@@ -188,6 +188,7 @@ public class VideoRecorder
             finally
             {
                 pendingEncodes.decrementAndGet();
+                if (onConsumed != null) onConsumed.run();
             }
         });
     }
