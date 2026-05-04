@@ -28,21 +28,31 @@ package com.osrstracker.video.encode;
  * Metadata for one Vulkan video encode session. A new segment is created
  * whenever the source extent changes, since the SPS/PPS and DPB are bound
  * to a fixed coded extent at session-create time.
+ *
+ * Source vs coded dimensions: coded is padded to a multiple of 16 for H.264
+ * macroblocks. SPS frame_cropping hides the padding at decode, so the MP4
+ * track header reports source dimensions and players display them correctly.
  */
 public final class EncodeSegment
 {
     public final int id;
-    public final int width;
-    public final int height;
+    public final int sourceWidth;
+    public final int sourceHeight;
+    public final int codedWidth;
+    public final int codedHeight;
     public final int fps;
     public final byte[] spsPps;
     public final long firstTimestampMs;
 
-    public EncodeSegment(int id, int width, int height, int fps, byte[] spsPps, long firstTimestampMs)
+    public EncodeSegment(int id, int sourceWidth, int sourceHeight,
+                         int codedWidth, int codedHeight, int fps,
+                         byte[] spsPps, long firstTimestampMs)
     {
         this.id = id;
-        this.width = width;
-        this.height = height;
+        this.sourceWidth = sourceWidth;
+        this.sourceHeight = sourceHeight;
+        this.codedWidth = codedWidth;
+        this.codedHeight = codedHeight;
         this.fps = fps;
         this.spsPps = spsPps;
         this.firstTimestampMs = firstTimestampMs;

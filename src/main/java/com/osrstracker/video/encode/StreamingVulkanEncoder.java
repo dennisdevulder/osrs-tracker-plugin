@@ -126,10 +126,9 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             {
                 initSegment(width, height, timestamp);
             }
-            else if (width != currentSegment.width || height != currentSegment.height)
+            else if (width != currentSegment.sourceWidth || height != currentSegment.sourceHeight)
             {
-                // Resize handling lives in a follow-up; drop until then.
-                return;
+                rotateSegment(width, height, timestamp);
             }
 
             int frameIndex = nextFrameIndex++;
@@ -152,6 +151,17 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         {
             log.error("streaming encode failed at ts={}", timestamp, e);
         }
+    }
+
+    private void rotateSegment(int width, int height, long timestamp)
+    {
+        log.debug("streaming encoder: resize {}x{} -> {}x{}, opening new segment",
+            currentSegment.sourceWidth, currentSegment.sourceHeight, width, height);
+        drainPending();
+        destroySession();
+        callCount = 0;
+        nextFrameIndex = 0;
+        initSegment(width, height, timestamp);
     }
 
     @Override
@@ -217,7 +227,8 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             timestamps[i] = s.timestampMs;
         }
 
-        byte[] mp4 = LocalMp4Writer.toBytes(bs.toByteArray(), seg.spsPps, seg.width, seg.height, seg.fps, timestamps);
+        byte[] mp4 = LocalMp4Writer.toBytes(bs.toByteArray(), seg.spsPps,
+            seg.sourceWidth, seg.sourceHeight, seg.fps, timestamps);
         return new ClipData(Collections.singletonList(mp4), "video/mp4", mp4.length);
     }
 
@@ -245,10 +256,10 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         stop();
     }
 
-    private void initSegment(int width, int height, long firstTimestamp)
+    private void initSegment(int sourceWidth, int sourceHeight, long firstTimestamp)
     {
-        int paddedWidth = (width + 15) & ~15;
-        int paddedHeight = (height + 15) & ~15;
+        int codedWidth = (sourceWidth + 15) & ~15;
+        int codedHeight = (sourceHeight + 15) & ~15;
 
         if (!vulkanInitialized)
         {
@@ -257,20 +268,22 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             vulkanInitialized = true;
         }
 
-        sessionConfig = new H264SessionConfig(vulkanDevice, caps, paddedWidth, paddedHeight, sourceFps);
+        sessionConfig = new H264SessionConfig(vulkanDevice, caps, codedWidth, codedHeight, sourceFps);
         sessionConfig.initialize();
 
-        resources = new EncodeResources(vulkanDevice, caps, paddedWidth, paddedHeight);
+        resources = new EncodeResources(vulkanDevice, caps, codedWidth, codedHeight);
         allocateCommandBuffers();
 
         frameEncoder = new FrameEncoder(
             vulkanDevice, caps, sessionConfig, resources,
             commandBuffers, gfxCommandBuffers,
             encodeFences, uploadSemaphores,
-            paddedWidth, paddedHeight, sourceFps);
+            codedWidth, codedHeight, sourceFps);
 
         byte[] spsPps = sessionConfig.fetchEncodedSpsPps(0, 0, true, true);
-        currentSegment = new EncodeSegment(nextSegmentId++, paddedWidth, paddedHeight, sourceFps, spsPps, firstTimestamp);
+        currentSegment = new EncodeSegment(nextSegmentId++,
+            sourceWidth, sourceHeight, codedWidth, codedHeight, sourceFps,
+            spsPps, firstTimestamp);
         segments.add(currentSegment);
     }
 
