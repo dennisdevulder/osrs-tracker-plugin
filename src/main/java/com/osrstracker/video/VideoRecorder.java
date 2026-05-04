@@ -152,7 +152,7 @@ public class VideoRecorder
 
     public boolean isVulkanEncoderActive()
     {
-        return "vulkan-h264".equals(encoder.encoderName());
+        return encoder.encoderName().startsWith("vulkan-h264");
     }
 
     boolean isCurrentlyRecording()

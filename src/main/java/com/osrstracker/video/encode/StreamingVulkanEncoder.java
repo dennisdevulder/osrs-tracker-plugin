@@ -108,6 +108,11 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         inFlight.clear();
     }
 
+    /**
+     * Tears down per-recording state but keeps the device, command pools, and
+     * sync primitives alive so the next {@link #start} can reuse them. Use
+     * {@link #close} for terminal teardown.
+     */
     @Override
     public synchronized void stop()
     {
@@ -116,8 +121,8 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         segments.clear();
         inFlight.clear();
         destroySession();
-        destroyPersistent();
-        vulkanDevice.close();
+        callCount = 0;
+        nextFrameIndex = 0;
     }
 
     @Override
@@ -258,7 +263,13 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     {
         if (closed) return;
         closed = true;
-        stop();
+        drainPending();
+        nalRing.reset();
+        segments.clear();
+        inFlight.clear();
+        destroySession();
+        destroyPersistent();
+        vulkanDevice.close();
     }
 
     private void initSegment(int sourceWidth, int sourceHeight, long firstTimestamp)
