@@ -36,3 +36,8 @@ runelite-cache/
 run-with-plugin.bat
 CLAUDE.md
 install.sh
+
+# Branch-local tests — kept on disk for ./gradlew test, not shipped to plugin-hub
+src/test/java/com/osrstracker/video/encode/NalRingTest.java
+src/test/java/com/osrstracker/video/encode/StreamingFinalizeTest.java
+src/test/java/com/osrstracker/video/BytePoolTest.java
