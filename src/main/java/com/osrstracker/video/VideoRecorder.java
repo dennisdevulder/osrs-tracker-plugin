@@ -255,7 +255,7 @@ public class VideoRecorder
         VideoQuality quality = config.videoQuality();
         if (quality == VideoQuality.SMOOTH && !"vulkan-h264-streaming".equals(encoder.encoderName()))
         {
-            log.info("Experimental 60 FPS preset requires the streaming Vulkan encoder; falling back to Quality.");
+            sendChatMessage("Experimental 60 FPS needs the Vulkan streaming encoder; using Quality (30 FPS) instead.");
             quality = VideoQuality.QUALITY;
         }
         currentCaptureFps = quality.getFps() > 0 ? quality.getFps() : 30;
@@ -825,15 +825,18 @@ public class VideoRecorder
 
     private void showQuotaExceededMessage(String message)
     {
+        sendChatMessage(message != null ? message : "Daily video limit reached");
+    }
+
+    private void sendChatMessage(String message)
+    {
         if (chatMessageManager == null)
         {
             return;
         }
-
-        String displayMessage = message != null ? message : "Daily video limit reached";
         chatMessageManager.queue(QueuedMessage.builder()
             .type(ChatMessageType.GAMEMESSAGE)
-            .runeLiteFormattedMessage("<col=ff9040>[OSRS Tracker] " + displayMessage + "</col>")
+            .runeLiteFormattedMessage("<col=ff9040>[OSRS Tracker] " + message + "</col>")
             .build());
     }
 
