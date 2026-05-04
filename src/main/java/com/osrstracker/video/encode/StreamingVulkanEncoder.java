@@ -150,8 +150,11 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             {
                 initSegment(width, height, timestamp);
             }
-            else if (width != currentSegment.sourceWidth || height != currentSegment.sourceHeight)
+            else if (width > currentSegment.codedWidth || height > currentSegment.codedHeight)
             {
+                // Only rotate when the new frame doesn't fit. Smaller frames
+                // pad into the existing extent (sidebar open, dialogs, etc.)
+                // so the pre-roll buffer survives non-fullscreen UI changes.
                 rotateSegment(width, height, timestamp);
             }
 
