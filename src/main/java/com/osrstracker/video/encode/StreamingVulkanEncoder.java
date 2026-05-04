@@ -182,10 +182,8 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
 
     private void rotateSegment(int width, int height, long timestamp)
     {
-        log.info("streaming encoder: rotate segment src {}x{} (coded {}x{}) -> {}x{}",
-            currentSegment.sourceWidth, currentSegment.sourceHeight,
-            currentSegment.codedWidth, currentSegment.codedHeight,
-            width, height);
+        log.debug("streaming encoder: rotate segment {}x{} -> {}x{}",
+            currentSegment.sourceWidth, currentSegment.sourceHeight, width, height);
         drainPending();
         destroySession();
         callCount = 0;
@@ -202,21 +200,13 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         if (all.isEmpty()) return null;
 
         int targetSegment = -1;
-        long oldestTs = Long.MAX_VALUE;
-        long newestTs = Long.MIN_VALUE;
-        java.util.Set<Integer> segmentsInRing = new java.util.HashSet<>();
         for (NalRing.Slot s : all)
         {
-            segmentsInRing.add(s.segmentId);
-            if (s.timestampMs < oldestTs) oldestTs = s.timestampMs;
-            if (s.timestampMs > newestTs) newestTs = s.timestampMs;
             if (s.timestampMs >= startTime && s.timestampMs <= endTime && s.segmentId > targetSegment)
             {
                 targetSegment = s.segmentId;
             }
         }
-        log.info("finalizeClip: window=[{}, {}] ringSize={} ringSpan=[{}, {}] segmentsInRing={} targetSegment={}",
-            startTime, endTime, all.size(), oldestTs, newestTs, segmentsInRing, targetSegment);
         if (targetSegment < 0) return null;
 
         // Pick the latest IDR at or before startTime so the clip starts with
@@ -249,9 +239,6 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             log.warn("streaming finalize: no IDR in [{}, {}] for segment {}", startTime, endTime, targetSegment);
             return null;
         }
-        log.info("finalizeClip: chose segment {}, IDR at idx {} ts {} (vs startTime {}, leadIn {}ms)",
-            targetSegment, idrIdx, all.get(idrIdx).timestampMs, startTime,
-            startTime - all.get(idrIdx).timestampMs);
 
         List<NalRing.Slot> chosen = new ArrayList<>();
         for (int i = idrIdx; i < all.size(); i++)
