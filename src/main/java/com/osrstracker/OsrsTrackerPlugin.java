@@ -725,7 +725,7 @@ public class OsrsTrackerPlugin extends Plugin
             int quantity = item.getQuantity();
             net.runelite.api.ItemComposition composition = itemManager.getItemComposition(itemId);
             String itemName = (composition != null) ? composition.getName() : "Unknown";
-            long itemPrice = (long) itemManager.getItemPrice(itemId) * quantity;
+            long itemPrice = itemManager.getItemPrice(itemId) * quantity;
 
             lootItems.add(new BingoProgressReporter.LootItem(itemId, itemName, quantity, itemPrice));
             totalValue += itemPrice;
