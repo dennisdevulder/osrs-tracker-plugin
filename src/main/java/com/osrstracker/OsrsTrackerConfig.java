@@ -40,11 +40,11 @@ public interface OsrsTrackerConfig extends Config
     // Minimum loot value (100k GP)
     int MINIMUM_LOOT_VALUE = 100000;
 
-    // Environment variable to enable dev mode (shows API URL config)
-    // Set OSRS_TRACKER_DEV=true to enable
+    // System property to enable dev mode (shows API URL config)
+    // Launch with -Dosrstracker.dev=true to enable
     static boolean isDevMode()
     {
-        return "true".equalsIgnoreCase(System.getenv("OSRS_TRACKER_DEV"));
+        return Boolean.getBoolean("osrstracker.dev");
     }
 
     /**
@@ -132,7 +132,7 @@ public interface OsrsTrackerConfig extends Config
 
     /**
      * Returns the effective API URL to use.
-     * In dev mode (OSRS_TRACKER_DEV=true), checks OSRS_TRACKER_API_URL env var.
+     * In dev mode (-Dosrstracker.dev=true), checks the osrstracker.apiUrl system property.
      * Otherwise uses production URL.
      *
      * Note: This is static to avoid RuneLite treating it as a config item.
@@ -141,7 +141,7 @@ public interface OsrsTrackerConfig extends Config
     {
         if (isDevMode())
         {
-            String devUrl = System.getenv("OSRS_TRACKER_API_URL");
+            String devUrl = System.getProperty("osrstracker.apiUrl");
             if (devUrl != null && !devUrl.isEmpty())
             {
                 return devUrl;

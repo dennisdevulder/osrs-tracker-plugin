@@ -195,8 +195,8 @@ public class ClueScrollTracker
             }
 
             ItemComposition comp = itemManager.getItemComposition(item.getId());
-            int price = itemManager.getItemPrice(item.getId());
-            long itemTotalValue = (long) price * item.getQuantity();
+            long price = itemManager.getItemPrice(item.getId());
+            long itemTotalValue = price * item.getQuantity();
 
             totalValue += itemTotalValue;
             itemCount++;
